@@ -34,9 +34,9 @@
 - [x] cueward search 指令
 
 ## Phase 4：Triage — LLM 摘要
-- [ ] LLM 整合介面（Anthropic / OpenAI API）
-- [ ] Prompt 模板與結構化 JSON 輸出
-- [ ] 僅對無法本地分類的 Cue 呼叫 LLM
+- [x] LLM 整合介面（Anthropic API，config.toml 設定，支援 env var）
+- [x] Prompt 模板與結構化 JSON 輸出（summary, tags, action_items）
+- [x] 僅對 aho-corasick 無法分類的 Cue 呼叫 LLM
 
 ## Phase 5+（v0.2）
 - [ ] cueward plan（行事曆 / Reminders）

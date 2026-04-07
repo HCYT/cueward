@@ -4,7 +4,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use cueward_adapter_macos::MacosAdapter;
-use cueward_core::{inbox, CueIndex, PlatformAdapter, State, Tagger};
+use cueward_core::{inbox, CueIndex, LlmClient, PlatformAdapter, State, Tagger};
 
 #[derive(Parser)]
 #[command(name = "cueward", about = "Capture and triage your scattered knowledge")]
@@ -148,6 +148,7 @@ fn main() {
             }
 
             let tagger = Tagger::load();
+            let llm = LlmClient::load();
             let idx = match CueIndex::open_or_create() {
                 Ok(i) => i,
                 Err(e) => {
@@ -157,9 +158,42 @@ fn main() {
             };
 
             let mut total = 0;
+            let mut llm_count = 0;
             for (path, mut cues) in batches {
+                // Phase 1: local auto-tag
                 if let Some(t) = &tagger {
                     t.tag_all(&mut cues);
+                }
+
+                // Phase 2: LLM triage for untagged cues
+                if let Some(client) = &llm {
+                    for cue in cues.iter_mut().filter(|c| c.tags.is_empty()) {
+                        match client.triage(cue) {
+                            Ok(result) => {
+                                if cue.content.len() > 50 || cue.title.is_some() {
+                                    // Only use LLM summary for substantial content
+                                    cue.metadata
+                                        .insert("summary".into(), result.summary);
+                                }
+                                for tag in result.tags {
+                                    if !cue.tags.contains(&tag) {
+                                        cue.tags.push(tag);
+                                    }
+                                }
+                                for item in result.action_items {
+                                    cue.metadata
+                                        .entry("action_items".into())
+                                        .and_modify(|v| {
+                                            v.push_str("; ");
+                                            v.push_str(&item);
+                                        })
+                                        .or_insert(item);
+                                }
+                                llm_count += 1;
+                            }
+                            Err(e) => eprintln!("warning: LLM triage failed: {e}"),
+                        }
+                    }
                 }
 
                 match idx.add_cues(&cues) {
@@ -181,6 +215,11 @@ fn main() {
                 eprintln!("auto-tagged with ~/.cueward/tags.toml");
             } else {
                 eprintln!("no tags.toml found, skipping auto-tag");
+            }
+            if llm.is_some() {
+                eprintln!("llm triaged {llm_count} untagged cues");
+            } else {
+                eprintln!("no config.toml found, skipping LLM triage");
             }
             eprintln!("indexed {total} cues");
         }
