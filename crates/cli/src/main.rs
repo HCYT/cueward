@@ -73,7 +73,16 @@ fn main() {
                 other => vec![other],
             };
 
+            let mut succeeded_sources: Vec<(&str, Vec<cueward_core::Cue>)> = Vec::new();
+
             for src in &sources {
+                let name = match src {
+                    Source::Safari => "safari",
+                    Source::Notes => "notes",
+                    Source::Messages => "messages",
+                    Source::All => unreachable!(),
+                };
+
                 let result = match src {
                     Source::Safari => adapter.capture_browser_history(since_dt),
                     Source::Notes => adapter.capture_notes(since_dt),
@@ -82,21 +91,18 @@ fn main() {
                 };
 
                 match result {
-                    Ok(cues) => all_cues.extend(cues),
+                    Ok(cues) => succeeded_sources.push((name, cues)),
                     Err(e) => eprintln!("warning: {e}"),
                 }
             }
 
-            // Update watermark
+            // Update watermark only for successful sources, using max captured timestamp
             let mut state = State::load();
-            for src in &sources {
-                let name = match src {
-                    Source::Safari => "safari",
-                    Source::Notes => "notes",
-                    Source::Messages => "messages",
-                    Source::All => unreachable!(),
-                };
-                state.set_watermark(name, Utc::now());
+            for (name, cues) in &succeeded_sources {
+                if let Some(max_ts) = cues.iter().map(|c| c.timestamp).max() {
+                    state.set_watermark(name, max_ts);
+                }
+                all_cues.extend(cues.iter().cloned());
             }
             if let Err(e) = state.save() {
                 eprintln!("warning: failed to save state: {e}");

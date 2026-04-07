@@ -75,8 +75,8 @@ pub fn capture(since: DateTime<Utc>) -> Result<Vec<Cue>, MacosError> {
             } else {
                 metadata.insert("direction".into(), "received".into());
             }
-            if let Some(s) = &sender {
-                metadata.insert("sender".into(), s.clone());
+            if let Some(s) = sender {
+                metadata.insert("sender".into(), s);
             }
 
             Cue {
@@ -84,7 +84,7 @@ pub fn capture(since: DateTime<Utc>) -> Result<Vec<Cue>, MacosError> {
                 timestamp: from_chat_timestamp(date),
                 content: text,
                 url: None,
-                title: sender,
+                title: None,
                 tags: Vec::new(),
                 metadata,
             }

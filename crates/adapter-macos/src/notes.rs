@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 
 use cueward_core::{Cue, CueSource};
 
@@ -10,10 +10,14 @@ use crate::MacosError;
 pub fn capture(since: DateTime<Utc>) -> Result<Vec<Cue>, MacosError> {
     let seconds_ago = (Utc::now() - since).num_seconds().max(0);
 
+    // Compute unix timestamps in AppleScript by getting the current unix time via
+    // `date +%s` and subtracting the delta between `current date` and `modification date`.
+    // This avoids locale-dependent date formatting and timezone offset issues.
     let script = format!(
         r#"
         set output to ""
         set sinceDate to (current date) - {seconds_ago}
+        set nowDate to current date
         tell application "Notes"
             set allNotes to every note
             repeat with theNote in allNotes
@@ -28,8 +32,9 @@ pub fn capture(since: DateTime<Utc>) -> Result<Vec<Cue>, MacosError> {
                         on error
                             set noteFolder to "Unknown"
                         end try
-                        set isoDate to (year of modDate) & "-" & text -2 thru -1 of ("0" & (month of modDate as integer)) & "-" & text -2 thru -1 of ("0" & (day of modDate)) & "T" & text -2 thru -1 of ("0" & (hours of modDate)) & ":" & text -2 thru -1 of ("0" & (minutes of modDate)) & ":" & text -2 thru -1 of ("0" & (seconds of modDate)) & "Z"
-                        set output to output & "---CUE_SEP---" & isoDate & "---FIELD---" & noteName & "---FIELD---" & noteFolder & "---FIELD---" & noteBody
+                        set secsDelta to nowDate - modDate
+                        set unixStr to do shell script "echo $(( $(date +%s) - " & secsDelta & " ))"
+                        set output to output & "---CUE_SEP---" & unixStr & "---FIELD---" & noteName & "---FIELD---" & noteFolder & "---FIELD---" & noteBody
                     end if
                 end try
             end repeat
@@ -63,7 +68,8 @@ pub fn capture(since: DateTime<Utc>) -> Result<Vec<Cue>, MacosError> {
             if fields.len() < 4 {
                 return None;
             }
-            let timestamp = fields[0].trim().parse::<DateTime<Utc>>().ok()?;
+            let unix_ts: i64 = fields[0].trim().parse().ok()?;
+            let timestamp = Utc.timestamp_opt(unix_ts, 0).single()?;
             let title = fields[1].trim().to_string();
             let folder = fields[2].trim().to_string();
             let body = fields[3].trim().to_string();
