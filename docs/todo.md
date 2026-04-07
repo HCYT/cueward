@@ -33,10 +33,9 @@
 - [x] inbox 持久化機制（capture → inbox → triage → processed）
 - [x] cueward search 指令
 
-## Phase 4：Triage — LLM 摘要
-- [x] LLM 整合介面（Anthropic API，config.toml 設定，支援 env var）
-- [x] Prompt 模板與結構化 JSON 輸出（summary, tags, action_items）
-- [x] 僅對 aho-corasick 無法分類的 Cue 呼叫 LLM
+## Phase 4：Agent 整合（設計變更）
+- [x] 決策：Cueward 不內建 LLM 呼叫，保持純 tool 定位
+- [ ] 撰寫 skill 文件，教 Agent 如何呼叫 Cueward CLI 並處理 JSON 輸出
 
 ## Phase 5+（v0.2）
 - [ ] cueward plan（行事曆 / Reminders）
