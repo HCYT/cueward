@@ -38,6 +38,9 @@ impl State {
     }
 
     pub fn set_watermark(&mut self, source: &str, ts: DateTime<Utc>) {
-        self.watermarks.insert(source.to_owned(), ts);
+        let entry = self.watermarks.entry(source.to_owned()).or_insert(ts);
+        if ts > *entry {
+            *entry = ts;
+        }
     }
 }
