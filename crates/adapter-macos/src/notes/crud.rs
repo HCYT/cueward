@@ -24,34 +24,11 @@ pub fn create_note(title: &str, body: &str, folder: &str) -> Result<(), MacosErr
     run(&script, "failed to create note")
 }
 
-pub(crate) fn html_body_for_update(title: &str, body: &str) -> String {
-    let html_title = title
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    let body_html = if body.is_empty() {
-        String::new()
-    } else {
-        body.split('\n')
-            .map(|line| {
-                if line.is_empty() {
-                    "<div><br></div>".to_string()
-                } else {
-                    format!("<div>{line}</div>")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    };
-
-    format!("<h1>{html_title}</h1>{body_html}")
-}
-
 /// Update an existing note's body by title.
 pub fn update_note(title: &str, body: &str, folder: &str) -> Result<(), MacosError> {
     let escaped_title = escape(title);
     let escaped_folder = escape(folder);
-    let body_expr = format!("\"{}\"", escape(&html_body_for_update(title, body)));
+    let body_expr = escape_body(body);
 
     let script = format!(
         r#"
@@ -108,7 +85,7 @@ pub fn move_note(title: &str, from_folder: &str, to_folder: &str) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{create_note, delete_note, html_body_for_update};
+    use super::{create_note, delete_note};
 
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -127,26 +104,6 @@ mod tests {
         assert!(
             result.is_ok(),
             "expected multiline note creation to succeed: {result:?}"
-        );
-    }
-
-    #[test]
-    fn html_body_for_update_preserves_title_as_heading() {
-        let body = html_body_for_update("Daily <Digest>", "Line 1\nLine 2");
-
-        assert_eq!(
-            body,
-            "<h1>Daily &lt;Digest&gt;</h1><div>Line 1</div><div>Line 2</div>"
-        );
-    }
-
-    #[test]
-    fn html_body_for_update_preserves_blank_lines() {
-        let body = html_body_for_update("Daily Digest", "Line 1\n\nLine 3");
-
-        assert_eq!(
-            body,
-            "<h1>Daily Digest</h1><div>Line 1</div><div><br></div><div>Line 3</div>"
         );
     }
 }

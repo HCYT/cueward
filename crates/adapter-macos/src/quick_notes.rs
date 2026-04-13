@@ -3,6 +3,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use rusqlite::{Connection, OpenFlags, params};
+
 use crate::MacosError;
 use crate::applescript::{escape, run};
 use crate::notes::crud;
@@ -14,31 +16,7 @@ pub struct QuickNote {
 }
 
 fn list_by_title(title: &str) -> Result<Vec<QuickNote>, MacosError> {
-    let escaped = title.replace('\'', "''");
-    let raw = query_db(&format!(
-        "SELECT n.ZTITLE1, f.ZTITLE2
-         FROM ZICCLOUDSYNCINGOBJECT n
-         LEFT JOIN ZICCLOUDSYNCINGOBJECT f ON n.ZFOLDER = f.Z_PK
-         WHERE n.Z_ENT = 11
-           AND n.ZISSYSTEMPAPER = 1
-           AND COALESCE(n.ZMARKEDFORDELETION, 0) != 1
-           AND (f.ZTITLE2 IS NULL OR f.ZTITLE2 != 'Recently Deleted')
-           AND n.ZTITLE1 = '{escaped}'"
-    ))?;
-
-    Ok(raw
-        .lines()
-        .filter(|line| !line.is_empty())
-        .filter_map(|line| {
-            let mut parts = line.splitn(2, '\t');
-            let title = parts.next()?.to_string();
-            let folder = parts.next().unwrap_or("").to_string();
-            if title.is_empty() {
-                return None;
-            }
-            Some(QuickNote { title, folder })
-        })
-        .collect())
+    query_notes(Some(title))
 }
 
 fn db_path() -> Result<PathBuf, MacosError> {
@@ -47,53 +25,54 @@ fn db_path() -> Result<PathBuf, MacosError> {
     Ok(PathBuf::from(home).join("Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"))
 }
 
-/// Run a read-only SQLite query via the sqlite3 CLI to get consistent WAL reads.
-fn query_db(sql: &str) -> Result<String, MacosError> {
+fn open_db() -> Result<Connection, MacosError> {
     let path = db_path()?;
-    let output = Command::new("/usr/bin/sqlite3")
-        .arg("-readonly")
-        .arg("-separator")
-        .arg("\t")
-        .arg(path)
-        .arg(sql)
-        .output()
-        .map_err(|e| MacosError::Other(format!("sqlite3: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(MacosError::Other(format!("sqlite3 error: {stderr}")));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|err| MacosError::Other(format!("failed to open NoteStore.sqlite: {err}")))
 }
 
-/// List all Quick Notes (notes with ZISSYSTEMPAPER = 1).
-pub fn list() -> Result<Vec<QuickNote>, MacosError> {
-    let raw = query_db(
-        "SELECT n.ZTITLE1, f.ZTITLE2
+fn query_notes(title_filter: Option<&str>) -> Result<Vec<QuickNote>, MacosError> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.ZTITLE1, f.ZTITLE2
          FROM ZICCLOUDSYNCINGOBJECT n
          LEFT JOIN ZICCLOUDSYNCINGOBJECT f ON n.ZFOLDER = f.Z_PK
          WHERE n.Z_ENT = 11
            AND n.ZISSYSTEMPAPER = 1
            AND COALESCE(n.ZMARKEDFORDELETION, 0) != 1
-           AND (f.ZTITLE2 IS NULL OR f.ZTITLE2 != 'Recently Deleted')",
-    )?;
+           AND (f.ZTITLE2 IS NULL OR f.ZTITLE2 != 'Recently Deleted')
+           AND (?1 IS NULL OR n.ZTITLE1 = ?1)",
+        )
+        .map_err(|err| MacosError::Other(format!("failed to prepare quick note query: {err}")))?;
 
-    let notes = raw
-        .lines()
-        .filter(|line| !line.is_empty())
-        .filter_map(|line| {
-            let mut parts = line.splitn(2, '\t');
-            let title = parts.next()?.to_string();
-            let folder = parts.next().unwrap_or("").to_string();
-            if title.is_empty() {
-                return None;
-            }
-            Some(QuickNote { title, folder })
+    let rows = stmt
+        .query_map(params![title_filter], |row| {
+            let title: String = row.get(0)?;
+            let folder: Option<String> = row.get(1)?;
+            Ok((title, folder.unwrap_or_default()))
         })
-        .collect();
+        .map_err(|err| MacosError::Other(format!("failed to query quick notes: {err}")))?;
+
+    let mut notes = Vec::new();
+    for row in rows {
+        let (title, folder) =
+            row.map_err(|err| MacosError::Other(format!("failed to read quick note row: {err}")))?;
+        if title.is_empty() {
+            continue;
+        }
+        notes.push(QuickNote { title, folder });
+    }
 
     Ok(notes)
+}
+
+/// List all Quick Notes (notes with ZISSYSTEMPAPER = 1).
+pub fn list() -> Result<Vec<QuickNote>, MacosError> {
+    query_notes(None)
 }
 
 /// Find a Quick Note's folder by title.
@@ -130,7 +109,7 @@ pub fn update(title: &str, body: &str) -> Result<(), MacosError> {
     let folder = find_folder(title)?;
     let escaped_title = escape(title);
     let escaped_folder = escape(&folder);
-    let body_expr = format!("\"{}\"", escape(&crud::html_body_for_update(title, body)));
+    let body_expr = format!("\"{}\"", escape(&html_body_for_update(title, body)));
 
     let script = format!(
         r#"
@@ -188,6 +167,26 @@ fn escape_html_text(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn html_body_for_update(title: &str, body: &str) -> String {
+    let html_title = escape_html_text(title);
+    let body_html = if body.is_empty() {
+        String::new()
+    } else {
+        body.split('\n')
+            .map(|line| {
+                if line.is_empty() {
+                    "<div><br></div>".to_string()
+                } else {
+                    format!("<div>{}</div>", escape_html_text(line))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
+
+    format!("<h1>{html_title}</h1>{body_html}")
+}
+
 fn strip_title_block(title: &str, body_html: &str) -> String {
     let title_div = format!("<div>{}</div>", escape_html_text(title));
     if let Some(rest) = body_html.strip_prefix(&title_div) {
@@ -228,7 +227,7 @@ pub fn archive(title: &str, to_folder: &str) -> Result<(), MacosError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_archive_destination, strip_title_block};
+    use super::{ensure_archive_destination, html_body_for_update, strip_title_block};
 
     #[test]
     fn strip_title_block_removes_leading_title_div() {
@@ -253,6 +252,16 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "archive destination must differ from the current quick note folder: Notes"
+        );
+    }
+
+    #[test]
+    fn html_body_for_update_escapes_title_and_body_lines() {
+        let html = html_body_for_update("A < B", "x < y & z\n\nq > r");
+
+        assert_eq!(
+            html,
+            "<h1>A &lt; B</h1><div>x &lt; y &amp; z</div><div><br></div><div>q &gt; r</div>"
         );
     }
 }
