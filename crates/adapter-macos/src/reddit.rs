@@ -1,9 +1,15 @@
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::MacosError;
 
 const REDDIT_BASE: &str = "https://old.reddit.com";
+const REDDIT_OPERATION_DELAY: Duration = Duration::from_secs(1);
+const REDDIT_MAX_RETRIES: usize = 3;
 const REDDIT_UA: &str = concat!(
     "cueward/",
     env!("CARGO_PKG_VERSION"),
@@ -182,28 +188,103 @@ fn build_search_url(query: &str, subreddit: Option<&str>, limit: usize) -> Strin
 }
 
 fn fetch_json(url: &str) -> Result<Value, MacosError> {
-    let response = ureq::get(url)
-        .set("User-Agent", REDDIT_UA)
-        .set("Accept", "application/json")
-        .call();
-    let response = match response {
-        Ok(response) => response,
-        Err(ureq::Error::Status(status, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            return Err(MacosError::Other(format!(
-                "reddit returned unexpected status {status}: {}",
-                body.trim()
-            )));
+    let mut last_error = None;
+
+    for attempt in 0..=REDDIT_MAX_RETRIES {
+        throttle_reddit_request()?;
+        let response = ureq::get(url)
+            .set("User-Agent", REDDIT_UA)
+            .set("Accept", "application/json")
+            .call();
+        match response {
+            Ok(response) => {
+                let body = response.into_string().map_err(|error| {
+                    MacosError::Other(format!("failed to read reddit response: {error}"))
+                })?;
+                return serde_json::from_str(&body).map_err(|error| {
+                    MacosError::Other(format!("invalid reddit json payload: {error}"))
+                });
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let retry_after = retry_after_delay(&response);
+                let body = response.into_string().unwrap_or_default();
+                if should_retry_status(status) && attempt < REDDIT_MAX_RETRIES {
+                    last_error = Some(format!(
+                        "reddit returned retryable status {status}: {}",
+                        body.trim()
+                    ));
+                    thread::sleep(retry_after.unwrap_or_else(|| reddit_backoff(attempt)));
+                    continue;
+                }
+                return Err(MacosError::Other(format!(
+                    "reddit returned unexpected status {status}: {}",
+                    body.trim()
+                )));
+            }
+            Err(ureq::Error::Transport(error)) => {
+                if attempt < REDDIT_MAX_RETRIES {
+                    last_error = Some(format!("reddit request failed: {error}"));
+                    thread::sleep(reddit_backoff(attempt));
+                    continue;
+                }
+                return Err(MacosError::Other(format!("reddit request failed: {error}")));
+            }
         }
-        Err(ureq::Error::Transport(error)) => {
-            return Err(MacosError::Other(format!("reddit request failed: {error}")));
+    }
+
+    Err(MacosError::Other(
+        last_error.unwrap_or_else(|| "reddit request failed after retries".to_string()),
+    ))
+}
+
+fn reddit_request_state() -> &'static Mutex<Option<Instant>> {
+    static STATE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn compute_next_reddit_request(
+    now: Instant,
+    last_request_at: Option<Instant>,
+) -> (Option<Duration>, Instant) {
+    match last_request_at {
+        Some(last) if now < last + REDDIT_OPERATION_DELAY => {
+            let next_allowed = last + REDDIT_OPERATION_DELAY;
+            (Some(next_allowed - now), next_allowed)
         }
+        _ => (None, now),
+    }
+}
+
+fn throttle_reddit_request() -> Result<(), MacosError> {
+    let sleep_for = {
+        let mut guard = reddit_request_state()
+            .lock()
+            .map_err(|_| MacosError::Other("reddit request state poisoned".to_string()))?;
+        let now = Instant::now();
+        let (delay, next_allowed) = compute_next_reddit_request(now, *guard);
+        *guard = Some(next_allowed);
+        delay
     };
-    let body = response
-        .into_string()
-        .map_err(|error| MacosError::Other(format!("failed to read reddit response: {error}")))?;
-    serde_json::from_str(&body)
-        .map_err(|error| MacosError::Other(format!("invalid reddit json payload: {error}")))
+
+    if let Some(delay) = sleep_for {
+        thread::sleep(delay);
+    }
+    Ok(())
+}
+
+fn should_retry_status(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+fn retry_after_delay(response: &ureq::Response) -> Option<Duration> {
+    response
+        .header("Retry-After")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn reddit_backoff(attempt: usize) -> Duration {
+    Duration::from_secs(2 * (attempt as u64 + 1))
 }
 
 fn parse_subreddit_info(root: &Value) -> Result<RedditSubredditInfo, MacosError> {
@@ -340,156 +421,4 @@ fn optional_i64(data: &Map<String, Value>, key: &str) -> Option<i64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        build_feed_url, build_search_url, normalize_post_url, normalize_subreddit,
-        parse_listing_posts, parse_post_result, parse_subreddit_info,
-    };
-    use serde_json::json;
-
-    #[test]
-    fn normalize_subreddit_accepts_prefixed_or_plain_names() {
-        assert_eq!(normalize_subreddit("rust").unwrap(), "rust");
-        assert_eq!(normalize_subreddit("r/rust").unwrap(), "rust");
-        assert_eq!(normalize_subreddit(" R/Rust ").unwrap(), "rust");
-    }
-
-    #[test]
-    fn normalize_subreddit_rejects_invalid_names() {
-        assert!(normalize_subreddit("").is_err());
-        assert!(normalize_subreddit("r/").is_err());
-        assert!(normalize_subreddit("r/rust/top").is_err());
-    }
-
-    #[test]
-    fn normalize_post_url_rewrites_supported_hosts_to_old_reddit_json() {
-        let url = normalize_post_url(
-            "https://www.reddit.com/r/rust/comments/abc123/example_title/?utm_source=test",
-        )
-        .unwrap();
-
-        assert_eq!(
-            url,
-            "https://old.reddit.com/r/rust/comments/abc123/example_title/.json?limit=500"
-        );
-    }
-
-    #[test]
-    fn build_search_url_handles_global_and_subreddit_search() {
-        assert_eq!(
-            build_search_url("async rust", None, 10),
-            "https://old.reddit.com/search.json?q=async%20rust&limit=10&sort=relevance"
-        );
-        assert_eq!(
-            build_search_url("async rust", Some("rust"), 25),
-            "https://old.reddit.com/r/rust/search.json?q=async%20rust&restrict_sr=on&limit=25&sort=relevance"
-        );
-        assert_eq!(build_feed_url("rust", 20), "https://old.reddit.com/r/rust.json?limit=20");
-    }
-
-    #[test]
-    fn parse_subreddit_info_reads_about_payload() {
-        let payload = json!({
-            "kind": "t5",
-            "data": {
-                "display_name": "rust",
-                "display_name_prefixed": "r/rust",
-                "title": "The Rust Programming Language",
-                "public_description": "Fearless concurrency",
-                "subscribers": 123
-            }
-        });
-
-        let info = parse_subreddit_info(&payload).unwrap();
-
-        assert_eq!(info.name, "rust");
-        assert_eq!(info.display_name, "r/rust");
-        assert_eq!(info.title.as_deref(), Some("The Rust Programming Language"));
-        assert_eq!(info.description.as_deref(), Some("Fearless concurrency"));
-        assert_eq!(info.subscribers, Some(123));
-    }
-
-    #[test]
-    fn parse_listing_posts_reads_posts_from_listing_payload() {
-        let payload = json!({
-            "kind": "Listing",
-            "data": {
-                "children": [{
-                    "kind": "t3",
-                    "data": {
-                        "id": "abc123",
-                        "title": "Rust 1.90 released",
-                        "author": "example_user",
-                        "subreddit": "rust",
-                        "url": "https://www.rust-lang.org/",
-                        "permalink": "/r/rust/comments/abc123/rust_190_released/",
-                        "score": 420,
-                        "num_comments": 37,
-                        "created_utc": 1760000000,
-                        "selftext": ""
-                    }
-                }]
-            }
-        });
-
-        let posts = parse_listing_posts(&payload).unwrap();
-
-        assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].id, "abc123");
-        assert_eq!(posts[0].permalink, "https://reddit.com/r/rust/comments/abc123/rust_190_released/");
-    }
-
-    #[test]
-    fn parse_post_result_returns_post_and_top_level_comments_only() {
-        let payload = json!([
-            {
-                "kind": "Listing",
-                "data": {
-                    "children": [{
-                        "kind": "t3",
-                        "data": {
-                            "id": "abc123",
-                            "title": "Rust 1.90 released",
-                            "author": "example_user",
-                            "subreddit": "rust",
-                            "url": "https://www.rust-lang.org/",
-                            "permalink": "/r/rust/comments/abc123/rust_190_released/",
-                            "score": 420,
-                            "num_comments": 37,
-                            "created_utc": 1760000000,
-                            "selftext": "release notes"
-                        }
-                    }]
-                }
-            },
-            {
-                "kind": "Listing",
-                "data": {
-                    "children": [
-                        {
-                            "kind": "t1",
-                            "data": {
-                                "id": "c1",
-                                "author": "commenter1",
-                                "body": "great release",
-                                "score": 12,
-                                "created_utc": 1760000100,
-                                "permalink": "/r/rust/comments/abc123/rust_190_released/c1/"
-                            }
-                        },
-                        {
-                            "kind": "more",
-                            "data": { "count": 3 }
-                        }
-                    ]
-                }
-            }
-        ]);
-
-        let result = parse_post_result(&payload).unwrap();
-
-        assert_eq!(result.post.id, "abc123");
-        assert_eq!(result.comments.len(), 1);
-        assert_eq!(result.comments[0].id, "c1");
-    }
-}
+mod tests;
