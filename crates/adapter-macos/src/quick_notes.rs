@@ -4,8 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::MacosError;
-use crate::applescript::{escape, escape_body, run};
-use crate::send;
+use crate::applescript::{escape, run};
+use crate::notes::crud;
 
 #[derive(serde::Serialize)]
 pub struct QuickNote {
@@ -122,7 +122,7 @@ fn find_unique(title: &str) -> Result<QuickNote, MacosError> {
 /// It will NOT appear in the system Quick Notes smart folder (快速備忘錄)
 /// — that requires creating via the macOS Quick Note gesture.
 pub fn create(title: &str, body: &str) -> Result<(), MacosError> {
-    send::create_note(title, body, "Quick Notes")
+    crud::create_note(title, body, "Quick Notes")
 }
 
 /// Update a Quick Note's body (preserves title).
@@ -130,17 +130,14 @@ pub fn update(title: &str, body: &str) -> Result<(), MacosError> {
     let folder = find_folder(title)?;
     let escaped_title = escape(title);
     let escaped_folder = escape(&folder);
-    let html_title = title
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    let body_expr = escape_body(&format!("<h1>{html_title}</h1><br>{body}"));
+    let body_expr = format!("\"{}\"", escape(&crud::html_body_for_update(title, body)));
 
     let script = format!(
         r#"
         tell application "Notes"
             set theNote to (first note of folder "{escaped_folder}" whose name is "{escaped_title}")
             set body of theNote to {body_expr}
+            set name of theNote to "{escaped_title}"
         end tell
         "#
     );
@@ -151,7 +148,7 @@ pub fn update(title: &str, body: &str) -> Result<(), MacosError> {
 /// Delete a Quick Note.
 pub fn delete(title: &str) -> Result<(), MacosError> {
     let folder = find_folder(title)?;
-    send::delete_note(title, &folder)
+    crud::delete_note(title, &folder)
 }
 
 fn read_body_html(title: &str, folder: &str) -> Result<String, MacosError> {
@@ -214,8 +211,8 @@ pub fn archive(title: &str, to_folder: &str) -> Result<(), MacosError> {
     let body_html = read_body_html(&note.title, &note.folder)?;
     let body = strip_title_block(&note.title, &body_html);
 
-    send::create_note(&note.title, &body, to_folder)?;
-    send::delete_note(&note.title, &note.folder)?;
+    crud::create_note(&note.title, &body, to_folder)?;
+    crud::delete_note(&note.title, &note.folder)?;
 
     // Notes/CloudKit updates can lag a bit after delete; poll longer before
     // concluding that the quick note is still present.
