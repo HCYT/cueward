@@ -1,101 +1,15 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags};
+use urlencoding::decode;
 
 use crate::MacosError;
+use crate::notes::{MapAttachment, MapNote, WebPreviewAttachment, WebPreviewNote};
 
-use super::{
-    APPLE_EPOCH_OFFSET, MAX_MEDIA_SEARCH_DEPTH, MapAttachment, MapNote, MediaAttachment, MediaNote,
-    WebPreviewAttachment, WebPreviewNote, home_dir,
-};
+use super::{normalize_media_title, open_notes_db, since_apple_epoch};
 
-pub(super) fn load_media_notes(since: DateTime<Utc>) -> Result<Vec<MediaNote>, MacosError> {
-    let note_store = notes_group_container_path()?.join("NoteStore.sqlite");
-    let media_root = notes_group_container_path()?.join("Accounts");
-    let conn = Connection::open_with_flags(
-        note_store,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|err| MacosError::Other(format!("failed to open NoteStore.sqlite: {err}")))?;
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-        SELECT
-            note.ZMODIFICATIONDATE,
-            note.ZTITLE,
-            media.ZFILENAME,
-            media.ZIDENTIFIER
-        FROM ZICCLOUDSYNCINGOBJECT AS note
-        JOIN ZICCLOUDSYNCINGOBJECT AS media
-            ON note.ZMEDIA = media.Z_PK
-        WHERE note.ZMEDIA IS NOT NULL
-          AND note.ZMEDIA != 0
-          AND media.ZFILENAME IS NOT NULL
-          AND media.ZIDENTIFIER IS NOT NULL
-          AND note.ZMODIFICATIONDATE > ?
-        "#,
-        )
-        .map_err(|err| MacosError::Other(format!("failed to prepare media query: {err}")))?;
-
-    let since_apple_epoch = since.timestamp() as f64 - APPLE_EPOCH_OFFSET;
-    let mut rows = stmt
-        .query([since_apple_epoch])
-        .map_err(|err| MacosError::Other(format!("failed to query note media: {err}")))?;
-
-    let mut grouped: HashMap<(i64, Option<String>), Vec<MediaAttachment>> = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|err| MacosError::Other(format!("failed to read media row: {err}")))?
-    {
-        let modification_date: f64 = row.get(0).map_err(|err| {
-            MacosError::Other(format!("failed to decode modification date: {err}"))
-        })?;
-        let title: Option<String> = row
-            .get(1)
-            .map_err(|err| MacosError::Other(format!("failed to decode note title: {err}")))?;
-        let filename: String = row.get(2).map_err(|err| {
-            MacosError::Other(format!("failed to decode attachment filename: {err}"))
-        })?;
-        let identifier: String = row.get(3).map_err(|err| {
-            MacosError::Other(format!("failed to decode attachment identifier: {err}"))
-        })?;
-
-        let Some(path) = resolve_media_path(&media_root, &identifier, &filename) else {
-            continue;
-        };
-
-        let timestamp = (modification_date + APPLE_EPOCH_OFFSET).round() as i64;
-        grouped
-            .entry((timestamp, normalize_media_title(title)))
-            .or_default()
-            .push(MediaAttachment {
-                filename,
-                path,
-                sha256: None,
-            });
-    }
-
-    Ok(grouped
-        .into_iter()
-        .map(|((timestamp, title), attachments)| MediaNote {
-            timestamp,
-            title,
-            attachments,
-        })
-        .collect())
-}
-
-pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPreviewNote>, MacosError> {
-    let note_store = notes_group_container_path()?.join("NoteStore.sqlite");
-    let conn = Connection::open_with_flags(
-        note_store,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|err| MacosError::Other(format!("failed to open NoteStore.sqlite: {err}")))?;
+pub(crate) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPreviewNote>, MacosError> {
+    let conn = open_notes_db()?;
 
     let mut stmt = conn
         .prepare(
@@ -116,7 +30,6 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
         WHERE attachment.ZTYPEUTI = 'public.url'
           AND attachment.ZURLSTRING IS NOT NULL
           AND attachment.ZURLSTRING != ''
-          AND attachment.ZURLSTRING NOT LIKE '%maps.apple.com/%'
           AND COALESCE(
                 note.ZMODIFICATIONDATE,
                 note.ZMODIFICATIONDATE1,
@@ -127,9 +40,8 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
         )
         .map_err(|err| MacosError::Other(format!("failed to prepare web preview query: {err}")))?;
 
-    let since_apple_epoch = since.timestamp() as f64 - APPLE_EPOCH_OFFSET;
     let mut rows = stmt
-        .query([since_apple_epoch])
+        .query([since_apple_epoch(since)])
         .map_err(|err| MacosError::Other(format!("failed to query web previews: {err}")))?;
 
     let mut grouped: HashMap<(i64, Option<String>), Vec<WebPreviewAttachment>> = HashMap::new();
@@ -150,17 +62,21 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
             MacosError::Other(format!("failed to decode web preview url: {err}"))
         })?;
 
-        // `public.url` note rows often have NULL `ZMODIFICATIONDATE`, so this
-        // query uses the visible note title plus a timestamp fallback chain to
-        // align with the AppleScript capture output.
         let normalized_note_title = normalize_media_title(note_title);
+        if is_apple_maps_url(&url)
+            && map_attachment_from_row(attachment_title.clone(), normalized_note_title.as_deref(), url.clone())
+                .is_some()
+        {
+            continue;
+        }
+
         let Some(attachment) =
             web_preview_attachment_from_row(attachment_title, normalized_note_title.as_deref(), url)
         else {
             continue;
         };
 
-        let timestamp = (modification_date + APPLE_EPOCH_OFFSET).round() as i64;
+        let timestamp = (modification_date + 978_307_200.0).round() as i64;
         grouped
             .entry((timestamp, normalized_note_title))
             .or_default()
@@ -177,13 +93,8 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
         .collect())
 }
 
-pub(super) fn load_map_notes(since: DateTime<Utc>) -> Result<Vec<MapNote>, MacosError> {
-    let note_store = notes_group_container_path()?.join("NoteStore.sqlite");
-    let conn = Connection::open_with_flags(
-        note_store,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|err| MacosError::Other(format!("failed to open NoteStore.sqlite: {err}")))?;
+pub(crate) fn load_map_notes(since: DateTime<Utc>) -> Result<Vec<MapNote>, MacosError> {
+    let conn = open_notes_db()?;
 
     let mut stmt = conn
         .prepare(
@@ -213,9 +124,8 @@ pub(super) fn load_map_notes(since: DateTime<Utc>) -> Result<Vec<MapNote>, Macos
         )
         .map_err(|err| MacosError::Other(format!("failed to prepare map query: {err}")))?;
 
-    let since_apple_epoch = since.timestamp() as f64 - APPLE_EPOCH_OFFSET;
     let mut rows = stmt
-        .query([since_apple_epoch])
+        .query([since_apple_epoch(since)])
         .map_err(|err| MacosError::Other(format!("failed to query maps: {err}")))?;
 
     let mut grouped: HashMap<(i64, Option<String>), Vec<MapAttachment>> = HashMap::new();
@@ -243,7 +153,7 @@ pub(super) fn load_map_notes(since: DateTime<Utc>) -> Result<Vec<MapNote>, Macos
             continue;
         };
 
-        let timestamp = (modification_date + APPLE_EPOCH_OFFSET).round() as i64;
+        let timestamp = (modification_date + 978_307_200.0).round() as i64;
         grouped
             .entry((timestamp, normalized_note_title))
             .or_default()
@@ -303,25 +213,32 @@ fn preferred_map_title(
         .or_else(|| normalize_media_title(note_title.map(str::to_string)))
 }
 
+fn is_apple_maps_url(url: &str) -> bool {
+    url.contains("maps.apple.com/")
+}
+
 fn parse_map_coordinate(url: &str) -> Option<(f64, f64)> {
-    let coordinate = url
-        .split('?')
-        .nth(1)?
+    let query = url.split('#').next()?.split('?').nth(1)?;
+    let coordinate = query
         .split('&')
         .find_map(|pair| pair.strip_prefix("coordinate="))?;
     let mut parts = coordinate.split(',');
     let latitude = parts.next()?.parse::<f64>().ok()?;
     let longitude = parts.next()?.parse::<f64>().ok()?;
+
+    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+        return None;
+    }
+
     Some((latitude, longitude))
 }
 
 fn parse_map_name(url: &str) -> Option<String> {
-    let encoded = url
-        .split('?')
-        .nth(1)?
+    let query = url.split('#').next()?.split('?').nth(1)?;
+    let encoded = query
         .split('&')
         .find_map(|pair| pair.strip_prefix("name="))?;
-    let decoded = urlencoding::decode(encoded).ok()?;
+    let decoded = decode(encoded).ok()?;
     let trimmed = decoded.trim();
     if trimmed.is_empty() {
         None
@@ -335,7 +252,7 @@ fn map_attachment_from_row(
     note_title: Option<&str>,
     url: String,
 ) -> Option<MapAttachment> {
-    if !url.contains("maps.apple.com/") {
+    if !is_apple_maps_url(&url) {
         return None;
     }
 
@@ -350,103 +267,12 @@ fn map_attachment_from_row(
     })
 }
 
-fn normalize_media_title(title: Option<String>) -> Option<String> {
-    title.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn notes_group_container_path() -> Result<PathBuf, MacosError> {
-    Ok(home_dir()?.join("Library/Group Containers/group.com.apple.notes"))
-}
-
-fn resolve_media_path(media_root: &Path, identifier: &str, filename: &str) -> Option<PathBuf> {
-    let accounts = fs::read_dir(media_root).ok()?;
-    for account in accounts.flatten() {
-        let media_dir = account.path().join("Media").join(identifier);
-        if !media_dir.is_dir() {
-            continue;
-        }
-
-        if let Some(path) = find_named_file(&media_dir, filename) {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-fn find_named_file(root: &Path, filename: &str) -> Option<PathBuf> {
-    find_named_file_impl(root, filename, 0)
-}
-
-fn find_named_file_impl(root: &Path, filename: &str, depth: usize) -> Option<PathBuf> {
-    if depth > MAX_MEDIA_SEARCH_DEPTH {
-        return None;
-    }
-
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let file_type = entry.file_type().ok()?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_file() && path.file_name().and_then(|name| name.to_str()) == Some(filename)
-        {
-            return Some(path);
-        }
-        if file_type.is_dir() {
-            if let Some(found) = find_named_file_impl(&path, filename, depth + 1) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::{
-        find_named_file, map_attachment_from_row, preferred_map_title,
-        preferred_web_preview_title, web_preview_attachment_from_row,
+        map_attachment_from_row, preferred_map_title, preferred_web_preview_title,
+        web_preview_attachment_from_row,
     };
-
-    #[test]
-    fn find_named_file_walks_nested_media_directory() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let nested = temp.path().join("a/b");
-        fs::create_dir_all(&nested).expect("create nested dirs");
-        let target = nested.join("image.png");
-        fs::write(&target, b"png").expect("write media file");
-
-        let found = find_named_file(temp.path(), "image.png");
-
-        assert_eq!(found, Some(target));
-    }
-
-    #[test]
-    fn find_named_file_respects_max_depth() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut current = temp.path().to_path_buf();
-        for idx in 0..12 {
-            current = current.join(format!("d{idx}"));
-        }
-        fs::create_dir_all(&current).expect("create nested dirs");
-        let target = current.join("image.png");
-        fs::write(&target, b"png").expect("write media file");
-
-        let found = find_named_file(temp.path(), "image.png");
-
-        assert_eq!(found, None);
-    }
 
     #[test]
     fn preferred_web_preview_title_prefers_attachment_then_note_then_url() {
@@ -549,5 +375,31 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn map_attachment_from_row_rejects_out_of_range_coordinates() {
+        assert_eq!(
+            map_attachment_from_row(
+                Some("Bad Place".into()),
+                Some("新增備忘錄"),
+                "https://maps.apple.com/place?coordinate=123.0,456.0&name=Bad".into(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn map_attachment_from_row_handles_url_fragment() {
+        let attachment = map_attachment_from_row(
+            Some("屏東縣立棒球場".into()),
+            Some("新增備忘錄"),
+            "https://maps.apple.com/place?coordinate=22.657349,120.485956&name=%E5%B1%8F%E6%9D%B1%E7%B8%A3%E7%AB%8B%E6%A3%92%E7%90%83%E5%A0%B4#label".into(),
+        )
+        .expect("map attachment with fragment");
+
+        assert_eq!(attachment.latitude, 22.657349);
+        assert_eq!(attachment.longitude, 120.485956);
+        assert_eq!(attachment.title.as_deref(), Some("屏東縣立棒球場"));
     }
 }
