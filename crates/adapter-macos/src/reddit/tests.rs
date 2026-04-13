@@ -31,7 +31,20 @@ fn normalize_post_url_rewrites_supported_hosts_to_old_reddit_json() {
 
     assert_eq!(
         url,
-        "https://old.reddit.com/r/rust/comments/abc123/example_title/.json?limit=500"
+        "https://old.reddit.com/r/rust/comments/abc123/example_title.json?limit=500"
+    );
+}
+
+#[test]
+fn normalize_post_url_ignores_query_and_fragment_without_trailing_slash() {
+    let url = normalize_post_url(
+        "https://www.reddit.com/r/rust/comments/abc123/example_title?context=3#top",
+    )
+    .unwrap();
+
+    assert_eq!(
+        url,
+        "https://old.reddit.com/r/rust/comments/abc123/example_title.json?limit=500"
     );
 }
 
@@ -93,6 +106,22 @@ fn parse_subreddit_info_reads_about_payload() {
     assert_eq!(info.title.as_deref(), Some("The Rust Programming Language"));
     assert_eq!(info.description.as_deref(), Some("Fearless concurrency"));
     assert_eq!(info.subscribers, Some(123));
+}
+
+#[test]
+fn parse_subreddit_info_ignores_negative_subscriber_count() {
+    let payload = json!({
+        "kind": "t5",
+        "data": {
+            "display_name": "rust",
+            "display_name_prefixed": "r/rust",
+            "subscribers": -1
+        }
+    });
+
+    let info = parse_subreddit_info(&payload).unwrap();
+
+    assert_eq!(info.subscribers, None);
 }
 
 #[test]

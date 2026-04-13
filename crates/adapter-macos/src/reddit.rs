@@ -148,7 +148,14 @@ fn normalize_post_url(input: &str) -> Result<String, MacosError> {
     if !matches!(host.as_str(), "reddit.com" | "www.reddit.com" | "old.reddit.com") {
         return Err(MacosError::Other(format!("invalid reddit post url: {input}")));
     }
-    let path = rest.trim_matches('/');
+    let path_only = rest
+        .split('?')
+        .next()
+        .unwrap_or(rest)
+        .split('#')
+        .next()
+        .unwrap_or(rest);
+    let path = path_only.trim_matches('/');
     let segments: Vec<&str> = path.split('/').collect();
     if segments.len() < 4 || segments[0] != "r" || segments[2] != "comments" {
         return Err(MacosError::Other(format!("invalid reddit post url: {input}")));
@@ -165,7 +172,7 @@ fn normalize_post_url(input: &str) -> Result<String, MacosError> {
         format!("/{slug}")
     };
     Ok(format!(
-        "{REDDIT_BASE}/r/{subreddit}/comments/{post_id}{suffix}/.json?limit=500"
+        "{REDDIT_BASE}/r/{subreddit}/comments/{post_id}{suffix}.json?limit=500"
     ))
 }
 
@@ -322,7 +329,7 @@ fn parse_post_result(root: &Value) -> Result<RedditPostResult, MacosError> {
         .iter()
         .filter_map(|child| thing_data(child).ok())
         .find_map(parse_post_summary)
-        .ok_or_else(|| MacosError::Other("post payload missing article section".to_string()))?;
+        .ok_or_else(|| MacosError::Other("post payload missing article data".to_string()))?;
     let comments = listing_children(comments_listing)?
         .iter()
         .filter(|child| child.get("kind").and_then(Value::as_str) == Some("t1"))
@@ -407,8 +414,13 @@ fn optional_string(data: &Map<String, Value>, key: &str) -> Option<String> {
 }
 
 fn optional_u64(data: &Map<String, Value>, key: &str) -> Option<u64> {
-    data.get(key)
-        .and_then(|value| value.as_u64().or_else(|| value.as_i64().map(|n| n as u64)))
+    data.get(key).and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_i64()
+                .and_then(|n| if n >= 0 { Some(n as u64) } else { None })
+        })
+    })
 }
 
 fn optional_i64(data: &Map<String, Value>, key: &str) -> Option<i64> {
