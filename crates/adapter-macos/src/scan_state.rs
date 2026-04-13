@@ -10,6 +10,7 @@ use crate::MacosError;
 pub const NORMAL_MIN_SCAN_INTERVAL: Duration = Duration::minutes(30);
 pub const BACKOFF_SCAN_INTERVAL: Duration = Duration::hours(6);
 pub const STALE_SKIP_AFTER: Duration = Duration::days(3);
+pub const STALE_RECHECK_INTERVAL: Duration = Duration::hours(24);
 pub const CONTENT_MAX_AGE_DAYS: i64 = 30;
 pub const MIN_CONTENT_WORDS: usize = 5;
 pub const MIN_CONTENT_CHARS: usize = 20;
@@ -52,6 +53,15 @@ pub fn load_state() -> State {
     State::load()
 }
 
+pub fn stored_entry<'a>(
+    state: &'a State,
+    key: &str,
+) -> Result<&'a ScanTargetState, MacosError> {
+    state
+        .scan_target(key)
+        .ok_or_else(|| MacosError::Other("scan state entry not found".to_string()))
+}
+
 pub fn save_state_warning(state: &State) -> Option<String> {
     state
         .save()
@@ -79,12 +89,14 @@ pub fn skip_reason(entry: &ScanTargetState, now: DateTime<Utc>) -> Option<String
     if entry.deleted {
         return Some("deleted_target".to_string());
     }
+    let last_checked_at = entry.last_checked_at?;
     if let Some(last_changed_at) = entry.last_changed_at {
-        if now - last_changed_at >= STALE_SKIP_AFTER {
-            return Some("stale_target".to_string());
+        if now - last_changed_at >= STALE_SKIP_AFTER
+            && now - last_checked_at < STALE_RECHECK_INTERVAL
+        {
+            return Some("stale_target_backoff".to_string());
         }
     }
-    let last_checked_at = entry.last_checked_at?;
     let min_interval = if entry.no_change_count >= 2 {
         BACKOFF_SCAN_INTERVAL
     } else {
@@ -167,7 +179,8 @@ pub fn is_bot_like_author(author: &str) -> bool {
 
 pub fn is_too_short(text: &str) -> bool {
     let trimmed = text.trim();
-    trimmed.chars().count() < MIN_CONTENT_CHARS || trimmed.split_whitespace().count() < MIN_CONTENT_WORDS
+    trimmed.chars().count() < MIN_CONTENT_CHARS
+        && trimmed.split_whitespace().count() < MIN_CONTENT_WORDS
 }
 
 pub fn is_too_old(created_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
@@ -181,7 +194,8 @@ mod tests {
     use serde::Serialize;
 
     use super::{
-        BACKOFF_SCAN_INTERVAL, NORMAL_MIN_SCAN_INTERVAL, ScanStatus, STALE_SKIP_AFTER,
+        BACKOFF_SCAN_INTERVAL, NORMAL_MIN_SCAN_INTERVAL, STALE_RECHECK_INTERVAL, ScanStatus,
+        STALE_SKIP_AFTER,
         build_scan_key, entry_for, fingerprint_json, is_bot_like_author, is_too_old, is_too_short,
         make_envelope, record_not_found, record_success, skip_reason,
     };
@@ -219,9 +233,15 @@ mod tests {
             Some("backoff_interval_not_elapsed")
         );
 
-        entry.last_checked_at = Some(now - BACKOFF_SCAN_INTERVAL - Duration::minutes(1));
+        entry.last_checked_at = Some(now - Duration::hours(12));
         entry.last_changed_at = Some(now - STALE_SKIP_AFTER - Duration::hours(1));
-        assert_eq!(skip_reason(entry, now).as_deref(), Some("stale_target"));
+        assert_eq!(
+            skip_reason(entry, now).as_deref(),
+            Some("stale_target_backoff")
+        );
+
+        entry.last_checked_at = Some(now - STALE_RECHECK_INTERVAL - Duration::hours(1));
+        assert_eq!(skip_reason(entry, now), None);
     }
 
     #[test]
@@ -286,6 +306,7 @@ mod tests {
         assert!(is_bot_like_author("AutoModerator"));
         assert!(is_bot_like_author("[deleted]"));
         assert!(is_too_short("too short"));
+        assert!(!is_too_short("這是一段足夠長但沒有空白的中文內容用來驗證長度判斷"));
         assert!(is_too_old(old, now));
         assert!(!is_too_old(now, now));
     }

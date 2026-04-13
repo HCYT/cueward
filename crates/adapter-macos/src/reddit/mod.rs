@@ -2,15 +2,9 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::scan_state::{
-    ScanEnvelope, ScanStatus, build_scan_key, entry_for, fingerprint_json, is_bot_like_author,
-    is_too_old, is_too_short, load_state, make_envelope, record_not_found, record_success,
-    save_state_warning, skip_reason,
-};
 use crate::MacosError;
 
 const REDDIT_BASE: &str = "https://old.reddit.com";
@@ -21,6 +15,12 @@ const REDDIT_UA: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/HCYT/cueward)"
 );
+
+mod scan;
+#[cfg(test)]
+mod tests;
+
+pub use scan::{feed, post, search};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RedditSubredditInfo {
@@ -80,161 +80,14 @@ pub struct RedditSearchResult {
     pub posts: Vec<RedditPostSummary>,
 }
 
-/// Read a subreddit feed via old.reddit.com JSON endpoints.
-pub fn feed(subreddit: &str, limit: usize) -> Result<ScanEnvelope<RedditFeedResult>, MacosError> {
-    validate_limit(limit)?;
-    let subreddit = normalize_subreddit(subreddit)?;
-    let target_url = build_feed_url(&subreddit, limit);
-    let key = build_scan_key("reddit", &target_url);
-    let now = Utc::now();
-    let mut state = load_state();
-
-    {
-        let entry = entry_for(&mut state, &key, "reddit", &target_url);
-        if entry.deleted {
-            return Ok(make_envelope(
-                entry,
-                ScanStatus::Deleted,
-                Some("deleted_target".to_string()),
-                None,
-                None,
-            ));
-        }
-        if let Some(reason) = skip_reason(entry, now) {
-            return Ok(make_envelope(entry, ScanStatus::Skipped, Some(reason), None, None));
-        }
-    }
-
-    let about = fetch_json(&build_about_url(&subreddit)).map_err(MacosError::from)?;
-    let listing = fetch_json(&target_url).map_err(MacosError::from)?;
-    let result = RedditFeedResult {
-        subreddit: parse_subreddit_info(&about)?,
-        posts: parse_listing_posts(&listing)?,
-    };
-    let fingerprint = fingerprint_json(&result.posts)?;
-    {
-        let entry = entry_for(&mut state, &key, "reddit", &target_url);
-        let status = record_success(entry, fingerprint, now);
-        let warning = save_state_warning(&state);
-        let entry = state.scan_target(&key).expect("scan state entry");
-        Ok(make_envelope(entry, status, None, warning, Some(result)))
-    }
-}
-
-/// Read a Reddit post plus its top-level comments.
-pub fn post(url: &str) -> Result<ScanEnvelope<RedditPostResult>, MacosError> {
-    let url = normalize_post_url(url)?;
-    let key = build_scan_key("reddit", &url);
-    let now = Utc::now();
-    let mut state = load_state();
-
-    {
-        let entry = entry_for(&mut state, &key, "reddit", &url);
-        if entry.deleted {
-            return Ok(make_envelope(
-                entry,
-                ScanStatus::Deleted,
-                Some("deleted_target".to_string()),
-                None,
-                None,
-            ));
-        }
-        if let Some(reason) = skip_reason(entry, now) {
-            return Ok(make_envelope(entry, ScanStatus::Skipped, Some(reason), None, None));
-        }
-    }
-
-    let payload = match fetch_json(&url) {
-        Ok(payload) => payload,
-        Err(FetchJsonError::NotFound) => {
-            let status = {
-                let entry = entry_for(&mut state, &key, "reddit", &url);
-                record_not_found(entry, now)
-            };
-            let warning = save_state_warning(&state);
-            let entry = state.scan_target(&key).expect("scan state entry");
-            let reason = match status {
-                ScanStatus::Deleted => Some("target_confirmed_deleted".to_string()),
-                ScanStatus::Warning => Some("target_missing_first_strike".to_string()),
-                _ => None,
-            };
-            return Ok(make_envelope(entry, status, reason, warning, None));
-        }
-        Err(error) => return Err(MacosError::from(error)),
-    };
-    let mut result = parse_post_result(&payload)?;
-    result.comments = filter_comments(result.comments, now);
-    let fingerprint = fingerprint_json(&result.comments)?;
-    let status = {
-        let entry = entry_for(&mut state, &key, "reddit", &url);
-        record_success(entry, fingerprint, now)
-    };
-    let warning = save_state_warning(&state);
-    let entry = state.scan_target(&key).expect("scan state entry");
-    Ok(make_envelope(entry, status, None, warning, Some(result)))
-}
-
-/// Search Reddit posts via the public JSON API.
-pub fn search(
-    query: &str,
-    subreddit: Option<&str>,
-    limit: usize,
-) -> Result<ScanEnvelope<RedditSearchResult>, MacosError> {
-    validate_limit(limit)?;
-    let query = query.trim();
-    if query.is_empty() {
-        return Err(MacosError::Other("reddit query must not be empty".to_string()));
-    }
-    let subreddit = match subreddit {
-        Some(value) => Some(normalize_subreddit(value)?),
-        None => None,
-    };
-    let target_url = build_search_url(query, subreddit.as_deref(), limit);
-    let key = build_scan_key("reddit", &target_url);
-    let now = Utc::now();
-    let mut state = load_state();
-
-    {
-        let entry = entry_for(&mut state, &key, "reddit", &target_url);
-        if entry.deleted {
-            return Ok(make_envelope(
-                entry,
-                ScanStatus::Deleted,
-                Some("deleted_target".to_string()),
-                None,
-                None,
-            ));
-        }
-        if let Some(reason) = skip_reason(entry, now) {
-            return Ok(make_envelope(entry, ScanStatus::Skipped, Some(reason), None, None));
-        }
-    }
-
-    let posts = parse_listing_posts(&fetch_json(&target_url).map_err(MacosError::from)?)?;
-    let result = RedditSearchResult {
-        query: query.to_string(),
-        subreddit,
-        limit,
-        posts,
-    };
-    let fingerprint = fingerprint_json(&result.posts)?;
-    let status = {
-        let entry = entry_for(&mut state, &key, "reddit", &target_url);
-        record_success(entry, fingerprint, now)
-    };
-    let warning = save_state_warning(&state);
-    let entry = state.scan_target(&key).expect("scan state entry");
-    Ok(make_envelope(entry, status, None, warning, Some(result)))
-}
-
-fn validate_limit(limit: usize) -> Result<(), MacosError> {
+pub(super) fn validate_limit(limit: usize) -> Result<(), MacosError> {
     if limit == 0 {
         return Err(MacosError::Other("reddit limit must be greater than 0".to_string()));
     }
     Ok(())
 }
 
-fn normalize_subreddit(input: &str) -> Result<String, MacosError> {
+pub(super) fn normalize_subreddit(input: &str) -> Result<String, MacosError> {
     let trimmed = input.trim();
     let trimmed = trimmed.strip_prefix("r/").unwrap_or(trimmed);
     let trimmed = trimmed.strip_prefix("R/").unwrap_or(trimmed);
@@ -245,7 +98,7 @@ fn normalize_subreddit(input: &str) -> Result<String, MacosError> {
     Ok(trimmed.to_ascii_lowercase())
 }
 
-fn normalize_post_url(input: &str) -> Result<String, MacosError> {
+pub(super) fn normalize_post_url(input: &str) -> Result<String, MacosError> {
     let trimmed = input.trim();
     let without_scheme = trimmed
         .strip_prefix("https://")
@@ -286,15 +139,15 @@ fn normalize_post_url(input: &str) -> Result<String, MacosError> {
     ))
 }
 
-fn build_about_url(subreddit: &str) -> String {
+pub(super) fn build_about_url(subreddit: &str) -> String {
     format!("{REDDIT_BASE}/r/{subreddit}/about.json")
 }
 
-fn build_feed_url(subreddit: &str, limit: usize) -> String {
+pub(super) fn build_feed_url(subreddit: &str, limit: usize) -> String {
     format!("{REDDIT_BASE}/r/{subreddit}.json?limit={limit}")
 }
 
-fn build_search_url(query: &str, subreddit: Option<&str>, limit: usize) -> String {
+pub(super) fn build_search_url(query: &str, subreddit: Option<&str>, limit: usize) -> String {
     let query = urlencoding::encode(query);
     match subreddit {
         Some(subreddit) => format!(
@@ -304,7 +157,7 @@ fn build_search_url(query: &str, subreddit: Option<&str>, limit: usize) -> Strin
     }
 }
 
-enum FetchJsonError {
+pub(super) enum FetchJsonError {
     NotFound,
     Other(MacosError),
 }
@@ -320,7 +173,7 @@ impl From<FetchJsonError> for MacosError {
     }
 }
 
-fn fetch_json(url: &str) -> Result<Value, FetchJsonError> {
+pub(super) fn fetch_json(url: &str) -> Result<Value, FetchJsonError> {
     let mut last_error = None;
 
     for attempt in 0..=REDDIT_MAX_RETRIES {
@@ -429,7 +282,7 @@ fn reddit_backoff(attempt: usize) -> Duration {
     Duration::from_secs(2 * (attempt as u64 + 1))
 }
 
-fn parse_subreddit_info(root: &Value) -> Result<RedditSubredditInfo, MacosError> {
+pub(super) fn parse_subreddit_info(root: &Value) -> Result<RedditSubredditInfo, MacosError> {
     let data = object(root, "reddit about payload")?
         .get("data")
         .ok_or_else(|| MacosError::Other("invalid reddit json payload: missing about data".to_string()))
@@ -443,7 +296,7 @@ fn parse_subreddit_info(root: &Value) -> Result<RedditSubredditInfo, MacosError>
     })
 }
 
-fn parse_listing_posts(root: &Value) -> Result<Vec<RedditPostSummary>, MacosError> {
+pub(super) fn parse_listing_posts(root: &Value) -> Result<Vec<RedditPostSummary>, MacosError> {
     let children = listing_children(root)?;
     Ok(children
         .iter()
@@ -452,7 +305,7 @@ fn parse_listing_posts(root: &Value) -> Result<Vec<RedditPostSummary>, MacosErro
         .collect())
 }
 
-fn parse_post_result(root: &Value) -> Result<RedditPostResult, MacosError> {
+pub(super) fn parse_post_result(root: &Value) -> Result<RedditPostResult, MacosError> {
     let items = array(root, "reddit post payload")?;
     let post_listing = items
         .first()
@@ -517,20 +370,6 @@ fn parse_comment(data: &Map<String, Value>) -> Option<RedditComment> {
     })
 }
 
-fn filter_comments(comments: Vec<RedditComment>, now: chrono::DateTime<Utc>) -> Vec<RedditComment> {
-    comments
-        .into_iter()
-        .filter(|comment| !is_bot_like_author(&comment.author))
-        .filter(|comment| !is_too_short(&comment.body))
-        .filter(|comment| {
-            Utc.timestamp_opt(comment.created_utc, 0)
-                .single()
-                .map(|created_at| !is_too_old(created_at, now))
-                .unwrap_or(true)
-        })
-        .collect()
-}
-
 fn prefixed_permalink(path: String) -> Option<String> {
     if path.is_empty() {
         return None;
@@ -580,6 +419,3 @@ fn optional_i64(data: &Map<String, Value>, key: &str) -> Option<i64> {
             .or_else(|| value.as_f64().map(|n| n as i64))
     })
 }
-
-#[cfg(test)]
-mod tests;

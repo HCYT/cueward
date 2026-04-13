@@ -3,10 +3,11 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use super::{
-    build_feed_url, build_search_url, compute_next_reddit_request, filter_comments,
-    normalize_post_url, normalize_subreddit, parse_listing_posts, parse_post_result,
-    parse_subreddit_info, reddit_backoff, should_retry_status, RedditComment,
+    build_feed_url, build_search_url, compute_next_reddit_request, normalize_post_url,
+    normalize_subreddit, parse_listing_posts, parse_post_result, parse_subreddit_info,
+    reddit_backoff, should_retry_status, RedditComment,
 };
+use super::scan::filter_comments;
 
 #[test]
 fn normalize_subreddit_accepts_prefixed_or_plain_names() {

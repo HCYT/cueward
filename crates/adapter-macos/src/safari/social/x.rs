@@ -2,12 +2,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use crate::MacosError;
 use crate::scan_state::{
     ScanEnvelope, ScanStatus, build_scan_key, entry_for, fingerprint_json, is_bot_like_author,
     is_too_old, is_too_short, load_state, make_envelope, record_not_found, record_success,
-    save_state_warning, skip_reason,
+    save_state_warning, skip_reason, stored_entry,
 };
 use crate::safari_guard::with_safari_session;
 
@@ -16,6 +17,15 @@ use super::super::script::escape_js_string;
 use super::SocialFeedPost;
 
 const X_HOME_URL: &str = "https://x.com/home";
+
+#[derive(Serialize)]
+struct XPostFingerprint<'a> {
+    author: &'a str,
+    handle: Option<&'a str>,
+    time: Option<&'a str>,
+    content: &'a str,
+    url: Option<&'a str>,
+}
 
 fn x_search_url(query: &str) -> String {
     let encoded = urlencoding::encode(query);
@@ -155,6 +165,20 @@ fn filter_x_posts(posts: Vec<SocialFeedPost>, now: DateTime<Utc>) -> Vec<SocialF
         .collect()
 }
 
+fn fingerprint_x_posts(posts: &[SocialFeedPost]) -> Result<String, MacosError> {
+    let payload: Vec<_> = posts
+        .iter()
+        .map(|post| XPostFingerprint {
+            author: &post.author,
+            handle: post.handle.as_deref(),
+            time: post.time.as_deref(),
+            content: &post.content,
+            url: post.url.as_deref(),
+        })
+        .collect();
+    fingerprint_json(&payload)
+}
+
 pub fn x_extract_feed(
     profile_filter: Option<&str>,
 ) -> Result<ScanEnvelope<Vec<SocialFeedPost>>, MacosError> {
@@ -180,13 +204,13 @@ pub fn x_extract_feed(
         }
         let _ = focus_tab("x.com", profile_filter);
         let posts = filter_x_posts(poll_x_posts(5, profile_filter)?, now);
-        let fingerprint = fingerprint_json(&posts)?;
+        let fingerprint = fingerprint_x_posts(&posts)?;
         let status = {
             let entry = entry_for(&mut state, &key, "x", &target_url);
             record_success(entry, fingerprint, now)
         };
         let warning = save_state_warning(&state);
-        let entry = state.scan_target(&key).expect("scan state entry");
+        let entry = stored_entry(&state, &key)?;
         Ok(make_envelope(entry, status, None, warning, Some(posts)))
     })
 }
@@ -217,13 +241,13 @@ pub fn x_search(
         }
         navigate_tab_or_open(&target_url, "x.com", profile_filter, "safari_x_search_navigate")?;
         let posts = filter_x_posts(poll_x_posts(10, profile_filter)?, now);
-        let fingerprint = fingerprint_json(&posts)?;
+        let fingerprint = fingerprint_x_posts(&posts)?;
         let status = {
             let entry = entry_for(&mut state, &key, "x", &target_url);
             record_success(entry, fingerprint, now)
         };
         let warning = save_state_warning(&state);
-        let entry = state.scan_target(&key).expect("scan state entry");
+        let entry = stored_entry(&state, &key)?;
         Ok(make_envelope(entry, status, None, warning, Some(posts)))
     })
 }
@@ -260,7 +284,7 @@ pub fn x_read_post(
                 record_not_found(entry, now)
             };
             let warning = save_state_warning(&state);
-            let entry = state.scan_target(&key).expect("scan state entry");
+            let entry = stored_entry(&state, &key)?;
             let reason = match status {
                 ScanStatus::Deleted => Some("target_confirmed_deleted".to_string()),
                 ScanStatus::Warning => Some("target_missing_first_strike".to_string()),
@@ -269,13 +293,13 @@ pub fn x_read_post(
             return Ok(make_envelope(entry, status, reason, warning, None));
         }
         let posts = filter_x_posts(raw_posts, now);
-        let fingerprint = fingerprint_json(&posts)?;
+        let fingerprint = fingerprint_x_posts(&posts)?;
         let status = {
             let entry = entry_for(&mut state, &key, "x", &target_url);
             record_success(entry, fingerprint, now)
         };
         let warning = save_state_warning(&state);
-        let entry = state.scan_target(&key).expect("scan state entry");
+        let entry = stored_entry(&state, &key)?;
         Ok(make_envelope(entry, status, None, warning, Some(posts)))
     })
 }
