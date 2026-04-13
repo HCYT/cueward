@@ -103,6 +103,10 @@ pub(super) fn since_apple_epoch(since: DateTime<Utc>) -> f64 {
     since.timestamp() as f64 - APPLE_EPOCH_OFFSET
 }
 
+pub(super) fn apple_to_unix_timestamp(apple_date: f64) -> i64 {
+    (apple_date + APPLE_EPOCH_OFFSET).round() as i64
+}
+
 pub(super) fn normalize_media_title(title: Option<String>) -> Option<String> {
     title.and_then(|value| {
         let trimmed = value.trim();
@@ -167,7 +171,7 @@ fn find_named_file_impl(root: &Path, filename: &str, depth: usize) -> Option<Pat
 mod tests {
     use std::fs;
 
-    use super::find_named_file;
+    use super::{apple_to_unix_timestamp, find_named_file};
 
     #[test]
     fn find_named_file_walks_nested_media_directory() {
@@ -196,5 +200,11 @@ mod tests {
         let found = find_named_file(temp.path(), "image.png");
 
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn apple_to_unix_timestamp_uses_shared_epoch_offset() {
+        assert_eq!(apple_to_unix_timestamp(0.0), 978_307_200);
+        assert_eq!(apple_to_unix_timestamp(1.4), 978_307_201);
     }
 }

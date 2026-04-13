@@ -6,7 +6,7 @@ use urlencoding::decode;
 use crate::MacosError;
 use crate::notes::{MapAttachment, MapNote, WebPreviewAttachment, WebPreviewNote};
 
-use super::{normalize_media_title, open_notes_db, since_apple_epoch};
+use super::{apple_to_unix_timestamp, normalize_media_title, open_notes_db, since_apple_epoch};
 
 pub(crate) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPreviewNote>, MacosError> {
     let conn = open_notes_db()?;
@@ -76,7 +76,7 @@ pub(crate) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
             continue;
         };
 
-        let timestamp = (modification_date + 978_307_200.0).round() as i64;
+        let timestamp = apple_to_unix_timestamp(modification_date);
         grouped
             .entry((timestamp, normalized_note_title))
             .or_default()
@@ -153,7 +153,7 @@ pub(crate) fn load_map_notes(since: DateTime<Utc>) -> Result<Vec<MapNote>, Macos
             continue;
         };
 
-        let timestamp = (modification_date + 978_307_200.0).round() as i64;
+        let timestamp = apple_to_unix_timestamp(modification_date);
         grouped
             .entry((timestamp, normalized_note_title))
             .or_default()
