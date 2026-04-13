@@ -8,8 +8,8 @@ use rusqlite::{Connection, OpenFlags};
 use crate::MacosError;
 
 use super::{
-    APPLE_EPOCH_OFFSET, MAX_MEDIA_SEARCH_DEPTH, MediaAttachment, MediaNote, WebPreviewAttachment,
-    WebPreviewNote, home_dir,
+    APPLE_EPOCH_OFFSET, MAX_MEDIA_SEARCH_DEPTH, MapAttachment, MapNote, MediaAttachment, MediaNote,
+    WebPreviewAttachment, WebPreviewNote, home_dir,
 };
 
 pub(super) fn load_media_notes(since: DateTime<Utc>) -> Result<Vec<MediaNote>, MacosError> {
@@ -116,6 +116,7 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
         WHERE attachment.ZTYPEUTI = 'public.url'
           AND attachment.ZURLSTRING IS NOT NULL
           AND attachment.ZURLSTRING != ''
+          AND attachment.ZURLSTRING NOT LIKE '%maps.apple.com/%'
           AND COALESCE(
                 note.ZMODIFICATIONDATE,
                 note.ZMODIFICATIONDATE1,
@@ -176,6 +177,89 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
         .collect())
 }
 
+pub(super) fn load_map_notes(since: DateTime<Utc>) -> Result<Vec<MapNote>, MacosError> {
+    let note_store = notes_group_container_path()?.join("NoteStore.sqlite");
+    let conn = Connection::open_with_flags(
+        note_store,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|err| MacosError::Other(format!("failed to open NoteStore.sqlite: {err}")))?;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+        SELECT
+            COALESCE(
+                note.ZMODIFICATIONDATE,
+                note.ZMODIFICATIONDATE1,
+                attachment.ZMODIFICATIONDATE,
+                attachment.ZMODIFICATIONDATE1
+            ),
+            note.ZTITLE1,
+            attachment.ZTITLE,
+            attachment.ZURLSTRING
+        FROM ZICCLOUDSYNCINGOBJECT AS attachment
+        JOIN ZICCLOUDSYNCINGOBJECT AS note
+            ON attachment.ZNOTE = note.Z_PK
+        WHERE attachment.ZTYPEUTI = 'public.url'
+          AND attachment.ZURLSTRING LIKE '%maps.apple.com/%'
+          AND COALESCE(
+                note.ZMODIFICATIONDATE,
+                note.ZMODIFICATIONDATE1,
+                attachment.ZMODIFICATIONDATE,
+                attachment.ZMODIFICATIONDATE1
+              ) > ?
+        "#,
+        )
+        .map_err(|err| MacosError::Other(format!("failed to prepare map query: {err}")))?;
+
+    let since_apple_epoch = since.timestamp() as f64 - APPLE_EPOCH_OFFSET;
+    let mut rows = stmt
+        .query([since_apple_epoch])
+        .map_err(|err| MacosError::Other(format!("failed to query maps: {err}")))?;
+
+    let mut grouped: HashMap<(i64, Option<String>), Vec<MapAttachment>> = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|err| MacosError::Other(format!("failed to read map row: {err}")))?
+    {
+        let modification_date: f64 = row
+            .get(0)
+            .map_err(|err| MacosError::Other(format!("failed to decode map modification date: {err}")))?;
+        let note_title: Option<String> = row
+            .get(1)
+            .map_err(|err| MacosError::Other(format!("failed to decode map note title: {err}")))?;
+        let attachment_title: Option<String> = row
+            .get(2)
+            .map_err(|err| MacosError::Other(format!("failed to decode map title: {err}")))?;
+        let url: String = row
+            .get(3)
+            .map_err(|err| MacosError::Other(format!("failed to decode map url: {err}")))?;
+
+        let normalized_note_title = normalize_media_title(note_title);
+        let Some(attachment) =
+            map_attachment_from_row(attachment_title, normalized_note_title.as_deref(), url)
+        else {
+            continue;
+        };
+
+        let timestamp = (modification_date + APPLE_EPOCH_OFFSET).round() as i64;
+        grouped
+            .entry((timestamp, normalized_note_title))
+            .or_default()
+            .push(attachment);
+    }
+
+    Ok(grouped
+        .into_iter()
+        .map(|((timestamp, title), attachments)| MapNote {
+            timestamp,
+            title,
+            attachments,
+        })
+        .collect())
+}
+
 fn preferred_web_preview_title(
     attachment_title: Option<String>,
     note_title: Option<&str>,
@@ -206,6 +290,63 @@ fn web_preview_attachment_from_row(
     Some(WebPreviewAttachment {
         title: preferred_web_preview_title(attachment_title, note_title, &url),
         url,
+    })
+}
+
+fn preferred_map_title(
+    attachment_title: Option<String>,
+    note_title: Option<&str>,
+    url_name: Option<&str>,
+) -> Option<String> {
+    normalize_media_title(attachment_title)
+        .or_else(|| normalize_media_title(url_name.map(str::to_string)))
+        .or_else(|| normalize_media_title(note_title.map(str::to_string)))
+}
+
+fn parse_map_coordinate(url: &str) -> Option<(f64, f64)> {
+    let coordinate = url
+        .split('?')
+        .nth(1)?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("coordinate="))?;
+    let mut parts = coordinate.split(',');
+    let latitude = parts.next()?.parse::<f64>().ok()?;
+    let longitude = parts.next()?.parse::<f64>().ok()?;
+    Some((latitude, longitude))
+}
+
+fn parse_map_name(url: &str) -> Option<String> {
+    let encoded = url
+        .split('?')
+        .nth(1)?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("name="))?;
+    let decoded = urlencoding::decode(encoded).ok()?;
+    let trimmed = decoded.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn map_attachment_from_row(
+    attachment_title: Option<String>,
+    note_title: Option<&str>,
+    url: String,
+) -> Option<MapAttachment> {
+    if !url.contains("maps.apple.com/") {
+        return None;
+    }
+
+    let (latitude, longitude) = parse_map_coordinate(&url)?;
+    let title = preferred_map_title(attachment_title, note_title, parse_map_name(&url).as_deref());
+
+    Some(MapAttachment {
+        title,
+        url: Some(url),
+        latitude,
+        longitude,
     })
 }
 
@@ -273,7 +414,10 @@ fn find_named_file_impl(root: &Path, filename: &str, depth: usize) -> Option<Pat
 mod tests {
     use std::fs;
 
-    use super::{find_named_file, preferred_web_preview_title, web_preview_attachment_from_row};
+    use super::{
+        find_named_file, map_attachment_from_row, preferred_map_title,
+        preferred_web_preview_title, web_preview_attachment_from_row,
+    };
 
     #[test]
     fn find_named_file_walks_nested_media_directory() {
@@ -357,6 +501,53 @@ mod tests {
         assert_eq!(
             attachment.url,
             "https://docs.cursor.com/guides/working-with-context"
+        );
+    }
+
+    #[test]
+    fn preferred_map_title_prefers_attachment_then_url_name_then_note() {
+        assert_eq!(
+            preferred_map_title(
+                Some("屏東縣立棒球場".into()),
+                Some("備忘錄標題"),
+                Some("地圖上的名稱")
+            ),
+            Some("屏東縣立棒球場".into())
+        );
+        assert_eq!(
+            preferred_map_title(None, Some("備忘錄標題"), Some("地圖上的名稱")),
+            Some("地圖上的名稱".into())
+        );
+        assert_eq!(
+            preferred_map_title(None, Some("備忘錄標題"), None),
+            Some("備忘錄標題".into())
+        );
+    }
+
+    #[test]
+    fn map_attachment_from_row_parses_coordinate_and_name() {
+        let attachment = map_attachment_from_row(
+            Some("屏東縣立棒球場".into()),
+            Some("新增備忘錄"),
+            "https://maps.apple.com/place?address=900044%E5%8F%B0%E7%81%A3%E5%B1%8F%E6%9D%B1%E7%B8%A3%E5%B1%8F%E6%9D%B1%E5%B8%82%E6%A3%92%E7%90%83%E8%B7%AF1%E8%99%9F&coordinate=22.657349,120.485956&name=%E5%B1%8F%E6%9D%B1%E7%B8%A3%E7%AB%8B%E6%A3%92%E7%90%83%E5%A0%B4&place-id=I3A6B061B285192F6".into(),
+        )
+        .expect("map attachment");
+
+        assert_eq!(attachment.title.as_deref(), Some("屏東縣立棒球場"));
+        assert_eq!(attachment.url.as_deref(), Some("https://maps.apple.com/place?address=900044%E5%8F%B0%E7%81%A3%E5%B1%8F%E6%9D%B1%E7%B8%A3%E5%B1%8F%E6%9D%B1%E5%B8%82%E6%A3%92%E7%90%83%E8%B7%AF1%E8%99%9F&coordinate=22.657349,120.485956&name=%E5%B1%8F%E6%9D%B1%E7%B8%A3%E7%AB%8B%E6%A3%92%E7%90%83%E5%A0%B4&place-id=I3A6B061B285192F6"));
+        assert_eq!(attachment.latitude, 22.657349);
+        assert_eq!(attachment.longitude, 120.485956);
+    }
+
+    #[test]
+    fn map_attachment_from_row_ignores_non_map_urls() {
+        assert_eq!(
+            map_attachment_from_row(
+                Some("Cursor Docs".into()),
+                Some("Working with Context"),
+                "https://docs.cursor.com/guides/working-with-context".into(),
+            ),
+            None
         );
     }
 }
