@@ -22,6 +22,7 @@ pub(super) fn labels_for_web_previews(
 
 pub(super) fn build_web_preview_segments(
     attachments: &[WebPreviewAttachment],
+    offset: usize,
     placeholder_count: usize,
 ) -> Vec<AttachmentSegment> {
     attachments
@@ -29,7 +30,7 @@ pub(super) fn build_web_preview_segments(
         .take(placeholder_count)
         .enumerate()
         .map(|(idx, attachment)| AttachmentSegment {
-            index: idx + 1,
+            index: offset + idx + 1,
             kind: AttachmentKind::WebPreview,
             title: attachment
                 .title

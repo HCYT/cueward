@@ -65,6 +65,7 @@ pub(crate) fn enrich_cues_with_attachments(
                     ));
                     segments.extend(build_web_preview_segments(
                         &web_preview_note.attachments,
+                        segments.len(),
                         remaining,
                     ));
                 }

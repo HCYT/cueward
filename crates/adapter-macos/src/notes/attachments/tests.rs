@@ -280,6 +280,8 @@ fn enrich_cues_with_attachments_combines_media_and_web_preview_segments() {
         "[Attachment 1: scan.jpg]\n[Attachment 2: Cursor Docs]"
     );
     assert_eq!(cues[0].attachment_segments.len(), 2);
+    assert_eq!(cues[0].attachment_segments[0].index, 1);
+    assert_eq!(cues[0].attachment_segments[1].index, 2);
     assert!(matches!(
         cues[0].attachment_segments[0].kind,
         AttachmentKind::Image
