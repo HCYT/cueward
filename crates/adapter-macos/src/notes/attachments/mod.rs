@@ -1,4 +1,5 @@
 mod image;
+mod web_preview;
 
 use std::collections::HashMap;
 
@@ -6,9 +7,12 @@ use cueward_core::{AttachmentKind, AttachmentSegment, Cue, CueSource};
 
 use super::{
     ATTACHMENT_LABEL, AttachmentOcrBlock, MEDIA_MATCH_WINDOW_SECS, MediaAttachment, MediaNote,
-    WebPreviewAttachment, WebPreviewNote,
+    WebPreviewNote,
 };
 use image::{collect_attachment_ocr_blocks, materialize_attachments};
+use web_preview::{
+    build_web_preview_segments, labels_for_web_previews, match_web_preview_note,
+};
 
 pub(crate) fn enrich_cues_with_attachments(
     cues: &mut [Cue],
@@ -25,57 +29,55 @@ pub(crate) fn enrich_cues_with_attachments(
             continue;
         }
 
+        let mut labels = Vec::new();
+        let mut segments = Vec::new();
+
         if let Some(media_note) = match_media_note(cue, media_notes) {
             if !media_note.attachments.is_empty() {
-                let attachments = materialize_attachments(&media_note.attachments, placeholder_count);
+                let remaining = placeholder_count.saturating_sub(labels.len());
+                let attachments = materialize_attachments(&media_note.attachments, remaining);
                 if !attachments.is_empty() {
-                    cue.content = replace_attachment_labels(
-                        &cue.content,
-                        &attachments
+                    labels.extend(
+                        attachments
                             .iter()
-                            .map(|attachment| attachment.filename.clone())
-                            .collect::<Vec<_>>(),
-                        placeholder_count,
+                            .map(|attachment| attachment.filename.clone()),
                     );
 
-                    let ocr_blocks = collect_attachment_ocr_blocks(&attachments, placeholder_count);
+                    let ocr_blocks = collect_attachment_ocr_blocks(&attachments, remaining);
                     if !ocr_blocks.is_empty() {
                         cue.content = append_attachment_ocr(&cue.content, &ocr_blocks);
                     }
 
-                    cue.attachment_segments =
-                        build_attachment_segments(&attachments, placeholder_count, Some(&ocr_blocks));
-                    continue;
+                    segments.extend(build_image_segments(&attachments, Some(&ocr_blocks)));
                 }
             }
         }
 
-        if let Some(web_preview_note) = match_web_preview_note(cue, web_preview_notes) {
-            if !web_preview_note.attachments.is_empty() {
-                cue.content = replace_attachment_labels(
-                    &cue.content,
-                    &web_preview_note
-                        .attachments
-                        .iter()
-                        .take(placeholder_count)
-                        .map(|attachment| {
-                            attachment
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| attachment.url.clone())
-                        })
-                        .collect::<Vec<_>>(),
-                    placeholder_count,
-                );
-                cue.attachment_segments = build_web_preview_segments(
-                    &web_preview_note.attachments,
-                    placeholder_count,
-                );
-                continue;
+        if labels.len() < placeholder_count {
+            if let Some(web_preview_note) = match_web_preview_note(cue, web_preview_notes) {
+                if !web_preview_note.attachments.is_empty() {
+                    let remaining = placeholder_count.saturating_sub(labels.len());
+                    labels.extend(labels_for_web_previews(
+                        &web_preview_note.attachments,
+                        remaining,
+                    ));
+                    segments.extend(build_web_preview_segments(
+                        &web_preview_note.attachments,
+                        remaining,
+                    ));
+                }
             }
         }
 
-        cue.attachment_segments = build_unresolved_segments(placeholder_count);
+        if !labels.is_empty() {
+            cue.content = replace_attachment_labels(&cue.content, &labels, placeholder_count);
+        }
+
+        if segments.len() < placeholder_count {
+            segments.extend(build_unresolved_segments_from(segments.len(), placeholder_count));
+        }
+
+        cue.attachment_segments = segments;
     }
 }
 
@@ -99,19 +101,17 @@ pub(crate) fn enrich_cues_with_media(cues: &mut [Cue], media_notes: &[MediaNote]
             continue;
         }
 
-        cue.content =
-            replace_attachment_labels(
-                &cue.content,
-                &media_note
-                    .attachments
-                    .iter()
-                    .map(|attachment| attachment.filename.clone())
-                    .collect::<Vec<_>>(),
-                placeholder_count,
-            );
+        cue.content = replace_attachment_labels(
+            &cue.content,
+            &media_note
+                .attachments
+                .iter()
+                .map(|attachment| attachment.filename.clone())
+                .collect::<Vec<_>>(),
+            placeholder_count,
+        );
 
-        cue.attachment_segments =
-            build_attachment_segments(&media_note.attachments, placeholder_count, None);
+        cue.attachment_segments = build_image_segments(&media_note.attachments, None);
     }
 }
 
@@ -126,14 +126,21 @@ fn match_media_note<'a>(cue: &Cue, media_notes: &'a [MediaNote]) -> Option<&'a M
     media_notes
         .iter()
         .filter(|note| (note.timestamp - cue_ts).abs() <= MEDIA_MATCH_WINDOW_SECS)
-        .min_by_key(|note| {
-            let title_penalty = match (cue_title, note.title.as_deref()) {
-                (Some(cue_title), Some(note_title)) if cue_title == note_title => 0,
-                (Some(_), Some(_)) => 1,
-                _ => 2,
-            };
-            (title_penalty, (note.timestamp - cue_ts).abs())
-        })
+        .min_by_key(|note| match_key(cue_title, cue_ts, note.title.as_deref(), note.timestamp))
+}
+
+pub(super) fn match_key(
+    cue_title: Option<&str>,
+    cue_ts: i64,
+    note_title: Option<&str>,
+    note_ts: i64,
+) -> (i32, i64) {
+    let title_penalty = match (cue_title, note_title) {
+        (Some(cue_title), Some(note_title)) if cue_title == note_title => 0,
+        (Some(_), Some(_)) => 1,
+        _ => 2,
+    };
+    (title_penalty, (note_ts - cue_ts).abs())
 }
 
 fn replace_attachment_labels(body: &str, labels: &[String], placeholder_count: usize) -> String {
@@ -170,9 +177,8 @@ fn append_attachment_ocr(content: &str, blocks: &[AttachmentOcrBlock]) -> String
     format!("{content}\n\n{}", sections.join("\n\n"))
 }
 
-fn build_attachment_segments(
+fn build_image_segments(
     attachments: &[MediaAttachment],
-    placeholder_count: usize,
     ocr_blocks: Option<&[AttachmentOcrBlock]>,
 ) -> Vec<AttachmentSegment> {
     let ocr_by_attachment: HashMap<String, &AttachmentOcrBlock> = ocr_blocks
@@ -186,9 +192,8 @@ fn build_attachment_segments(
         })
         .collect();
 
-    let mut segments: Vec<AttachmentSegment> = attachments
+    attachments
         .iter()
-        .take(placeholder_count)
         .enumerate()
         .map(|(idx, attachment)| {
             let key = attachment_lookup_key(attachment.sha256.as_deref(), &attachment.filename);
@@ -205,51 +210,13 @@ fn build_attachment_segments(
                 has_ocr: ocr.is_some(),
             }
         })
-        .collect();
-
-    if placeholder_count > segments.len() {
-        segments.extend(build_unresolved_segments_from(segments.len(), placeholder_count));
-    }
-
-    segments
+        .collect()
 }
 
-fn build_web_preview_segments(
-    attachments: &[WebPreviewAttachment],
+fn build_unresolved_segments_from(
+    existing_count: usize,
     placeholder_count: usize,
 ) -> Vec<AttachmentSegment> {
-    let mut segments: Vec<AttachmentSegment> = attachments
-        .iter()
-        .take(placeholder_count)
-        .enumerate()
-        .map(|(idx, attachment)| AttachmentSegment {
-            index: idx + 1,
-            kind: AttachmentKind::WebPreview,
-            title: attachment
-                .title
-                .clone()
-                .or_else(|| Some(attachment.url.clone())),
-            url: Some(attachment.url.clone()),
-            filename: None,
-            path: None,
-            sha256: None,
-            ocr_text: None,
-            has_ocr: false,
-        })
-        .collect();
-
-    if placeholder_count > segments.len() {
-        segments.extend(build_unresolved_segments_from(segments.len(), placeholder_count));
-    }
-
-    segments
-}
-
-fn build_unresolved_segments(placeholder_count: usize) -> Vec<AttachmentSegment> {
-    build_unresolved_segments_from(0, placeholder_count)
-}
-
-fn build_unresolved_segments_from(existing_count: usize, placeholder_count: usize) -> Vec<AttachmentSegment> {
     (existing_count..placeholder_count)
         .map(|idx| AttachmentSegment {
             index: idx + 1,
@@ -265,26 +232,6 @@ fn build_unresolved_segments_from(existing_count: usize, placeholder_count: usiz
         .collect()
 }
 
-fn match_web_preview_note<'a>(
-    cue: &Cue,
-    web_preview_notes: &'a [WebPreviewNote],
-) -> Option<&'a WebPreviewNote> {
-    let cue_ts = cue.timestamp.timestamp();
-    let cue_title = cue.title.as_deref();
-
-    web_preview_notes
-        .iter()
-        .filter(|note| (note.timestamp - cue_ts).abs() <= MEDIA_MATCH_WINDOW_SECS)
-        .min_by_key(|note| {
-            let title_penalty = match (cue_title, note.title.as_deref()) {
-                (Some(cue_title), Some(note_title)) if cue_title == note_title => 0,
-                (Some(_), Some(_)) => 1,
-                _ => 2,
-            };
-            (title_penalty, (note.timestamp - cue_ts).abs())
-        })
-}
-
 fn attachment_lookup_key(sha256: Option<&str>, filename: &str) -> String {
     sha256.unwrap_or(filename).to_string()
 }
@@ -298,9 +245,9 @@ mod tests {
     use cueward_core::{AttachmentKind, Cue, CueSource};
 
     use super::{
-        AttachmentOcrBlock, MediaAttachment, MediaNote, WebPreviewAttachment, WebPreviewNote,
-        append_attachment_ocr,
-        attachment_placeholder_count, build_attachment_segments, enrich_cues_with_media, replace_attachment_labels,
+        AttachmentOcrBlock, MediaAttachment, MediaNote, append_attachment_ocr,
+        attachment_placeholder_count, build_image_segments, enrich_cues_with_media,
+        replace_attachment_labels,
     };
 
     #[test]
@@ -418,7 +365,7 @@ mod tests {
             text: "detected text".into(),
         }];
 
-        let segments = build_attachment_segments(&attachments, 1, Some(&blocks));
+        let segments = build_image_segments(&attachments, Some(&blocks));
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].index, 1);
@@ -459,7 +406,7 @@ mod tests {
             },
         ];
 
-        let segments = build_attachment_segments(&attachments, 2, Some(&blocks));
+        let segments = build_image_segments(&attachments, Some(&blocks));
 
         assert_eq!(segments[0].ocr_text.as_deref(), Some("first"));
         assert_eq!(segments[1].ocr_text.as_deref(), Some("second"));
@@ -539,79 +486,50 @@ mod tests {
     }
 
     #[test]
-    fn enrich_cues_with_web_preview_emits_structured_segments() {
+    fn enrich_cues_with_attachments_combines_media_and_web_preview_segments() {
         let timestamp = Utc.with_ymd_and_hms(2026, 4, 10, 9, 0, 0).unwrap();
         let mut cues = vec![Cue {
             source: CueSource::Notes,
             timestamp,
-            content: "[Attachment]".into(),
+            content: "[Attachment]\n[Attachment]".into(),
             url: None,
-            title: Some("Working with Context".into()),
+            title: Some("Mixed note".into()),
             tags: Vec::new(),
             attachment_segments: Vec::new(),
             metadata: HashMap::new(),
         }];
-        let web_preview_notes = vec![WebPreviewNote {
+        let media_notes = vec![MediaNote {
             timestamp: timestamp.timestamp(),
-            title: Some("Working with Context".into()),
-            attachments: vec![WebPreviewAttachment {
+            title: Some("Mixed note".into()),
+            attachments: vec![MediaAttachment {
+                filename: "scan.jpg".into(),
+                path: PathBuf::from("/tmp/scan.jpg"),
+                sha256: Some("abc123".into()),
+            }],
+        }];
+        let web_preview_notes = vec![crate::notes::WebPreviewNote {
+            timestamp: timestamp.timestamp(),
+            title: Some("Mixed note".into()),
+            attachments: vec![crate::notes::WebPreviewAttachment {
                 title: Some("Cursor Docs".into()),
                 url: "https://docs.cursor.com/guides/working-with-context".into(),
             }],
         }];
 
-        super::enrich_cues_with_attachments(&mut cues, &[], &web_preview_notes);
-
-        assert_eq!(cues[0].content, "[Attachment 1: Cursor Docs]");
-        assert_eq!(cues[0].attachment_segments.len(), 1);
-        assert!(matches!(
-            cues[0].attachment_segments[0].kind,
-            AttachmentKind::WebPreview
-        ));
-        assert_eq!(
-            cues[0].attachment_segments[0].title.as_deref(),
-            Some("Cursor Docs")
-        );
-        assert_eq!(
-            cues[0].attachment_segments[0].url.as_deref(),
-            Some("https://docs.cursor.com/guides/working-with-context")
-        );
-        assert_eq!(cues[0].attachment_segments[0].path, None);
-        assert_eq!(cues[0].attachment_segments[0].filename, None);
-        assert!(!cues[0].attachment_segments[0].has_ocr);
-    }
-
-    #[test]
-    fn enrich_cues_with_web_preview_falls_back_to_url_when_title_missing() {
-        let timestamp = Utc.with_ymd_and_hms(2026, 4, 10, 9, 0, 0).unwrap();
-        let mut cues = vec![Cue {
-            source: CueSource::Notes,
-            timestamp,
-            content: "[Attachment]".into(),
-            url: None,
-            title: Some("Working with Context".into()),
-            tags: Vec::new(),
-            attachment_segments: Vec::new(),
-            metadata: HashMap::new(),
-        }];
-        let web_preview_notes = vec![WebPreviewNote {
-            timestamp: timestamp.timestamp(),
-            title: Some("Working with Context".into()),
-            attachments: vec![WebPreviewAttachment {
-                title: None,
-                url: "https://docs.cursor.com/guides/working-with-context".into(),
-            }],
-        }];
-
-        super::enrich_cues_with_attachments(&mut cues, &[], &web_preview_notes);
+        super::enrich_cues_with_attachments(&mut cues, &media_notes, &web_preview_notes);
 
         assert_eq!(
             cues[0].content,
-            "[Attachment 1: https://docs.cursor.com/guides/working-with-context]"
+            "[Attachment 1: scan.jpg]\n[Attachment 2: Cursor Docs]"
         );
-        assert_eq!(
-            cues[0].attachment_segments[0].title.as_deref(),
-            Some("https://docs.cursor.com/guides/working-with-context")
-        );
+        assert_eq!(cues[0].attachment_segments.len(), 2);
+        assert!(matches!(
+            cues[0].attachment_segments[0].kind,
+            AttachmentKind::Image
+        ));
+        assert!(matches!(
+            cues[0].attachment_segments[1].kind,
+            AttachmentKind::WebPreview
+        ));
     }
 }

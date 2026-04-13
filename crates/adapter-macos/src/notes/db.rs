@@ -149,13 +149,19 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
             MacosError::Other(format!("failed to decode web preview url: {err}"))
         })?;
 
-        let Some(attachment) = web_preview_attachment_from_row(attachment_title, note_title.clone(), url) else {
+        // `public.url` note rows often have NULL `ZMODIFICATIONDATE`, so this
+        // query uses the visible note title plus a timestamp fallback chain to
+        // align with the AppleScript capture output.
+        let normalized_note_title = normalize_media_title(note_title);
+        let Some(attachment) =
+            web_preview_attachment_from_row(attachment_title, normalized_note_title.as_deref(), url)
+        else {
             continue;
         };
 
         let timestamp = (modification_date + APPLE_EPOCH_OFFSET).round() as i64;
         grouped
-            .entry((timestamp, normalize_media_title(note_title)))
+            .entry((timestamp, normalized_note_title))
             .or_default()
             .push(attachment);
     }
@@ -172,11 +178,11 @@ pub(super) fn load_web_preview_notes(since: DateTime<Utc>) -> Result<Vec<WebPrev
 
 fn preferred_web_preview_title(
     attachment_title: Option<String>,
-    note_title: Option<String>,
+    note_title: Option<&str>,
     url: &str,
 ) -> Option<String> {
     normalize_media_title(attachment_title)
-        .or_else(|| normalize_media_title(note_title))
+        .or_else(|| normalize_media_title(note_title.map(str::to_string)))
         .or_else(|| {
             let trimmed = url.trim();
             if trimmed.is_empty() {
@@ -189,7 +195,7 @@ fn preferred_web_preview_title(
 
 fn web_preview_attachment_from_row(
     attachment_title: Option<String>,
-    note_title: Option<String>,
+    note_title: Option<&str>,
     url: String,
 ) -> Option<WebPreviewAttachment> {
     let url = url.trim().to_string();
@@ -303,7 +309,7 @@ mod tests {
         assert_eq!(
             preferred_web_preview_title(
                 Some("Cursor Docs".into()),
-                Some("Working with Context".into()),
+                Some("Working with Context"),
                 "https://docs.cursor.com/guides/working-with-context",
             ),
             Some("Cursor Docs".into())
@@ -311,7 +317,7 @@ mod tests {
         assert_eq!(
             preferred_web_preview_title(
                 None,
-                Some("Working with Context".into()),
+                Some("Working with Context"),
                 "https://docs.cursor.com/guides/working-with-context",
             ),
             Some("Working with Context".into())
@@ -331,7 +337,7 @@ mod tests {
         assert_eq!(
             web_preview_attachment_from_row(
                 Some("Cursor Docs".into()),
-                Some("Working with Context".into()),
+                Some("Working with Context"),
                 "   ".into(),
             ),
             None
@@ -342,7 +348,7 @@ mod tests {
     fn web_preview_attachment_from_row_builds_structured_attachment() {
         let attachment = web_preview_attachment_from_row(
             Some("Cursor Docs".into()),
-            Some("Working with Context".into()),
+            Some("Working with Context"),
             "https://docs.cursor.com/guides/working-with-context".into(),
         )
         .expect("attachment");
