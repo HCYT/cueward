@@ -2,17 +2,44 @@ use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
 use serde::Serialize;
 
 use crate::MacosError;
-use crate::applescript::{escape, run_capture};
+use crate::applescript::{escape, escape_body, run, run_capture};
 
 const REMINDER_SEPARATOR: &str = "---REMINDER_SEP---";
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct ReminderItem {
+    pub id: String,
     pub title: String,
     pub notes: String,
     pub due_date: Option<String>,
     pub completed: bool,
     pub list_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReminderSelector {
+    Id(String),
+    Title(String),
+}
+
+fn applescript_date_block(var_name: &str, dt: &DateTime<Local>) -> String {
+    format!(
+        r#"set {var_name} to current date
+            set day of {var_name} to 1
+            set year of {var_name} to {y}
+            set month of {var_name} to {m}
+            set day of {var_name} to {d}
+            set hours of {var_name} to {h}
+            set minutes of {var_name} to {min}
+            set seconds of {var_name} to {s}"#,
+        var_name = var_name,
+        y = dt.format("%Y"),
+        m = dt.format("%-m"),
+        d = dt.format("%-d"),
+        h = dt.format("%-H"),
+        min = dt.format("%-M"),
+        s = dt.format("%-S"),
+    )
 }
 
 fn local_datetime_components(dt: &DateTime<Local>) -> (i32, u32, u32, u32) {
@@ -51,9 +78,11 @@ fn decode_field(value: &str) -> String {
 
 fn parse_reminder_line(line: &str) -> Option<ReminderItem> {
     let parts: Vec<&str> = line.split('\t').collect();
-    if parts.len() != 5 {
-        return None;
-    }
+    let (id, parts) = match parts.len() {
+        6 => (decode_field(parts[0]), &parts[1..]),
+        5 => (String::new(), &parts[..]),
+        _ => return None,
+    };
 
     let title = decode_field(parts[0]);
     if title.is_empty() {
@@ -66,6 +95,7 @@ fn parse_reminder_line(line: &str) -> Option<ReminderItem> {
     };
 
     Some(ReminderItem {
+        id,
         title,
         notes: decode_field(parts[1]),
         due_date,
@@ -129,6 +159,44 @@ fn reminders_script_prelude() -> String {
     )
 }
 
+fn build_list_lookup_block(list_name: &str) -> String {
+    let escaped = escape(list_name);
+    format!(
+        r#"try
+                set targetList to list "{escaped}"
+            on error
+                make new list with properties {{name:"{escaped}"}}
+                set targetList to list "{escaped}"
+            end try"#
+    )
+}
+
+fn build_reminder_lookup_script(reminder_id: &str, action_block: &str) -> String {
+    let escaped_id = escape(reminder_id);
+    format!(
+        r#"
+        tell application "Reminders"
+            set targetReminder to missing value
+            repeat with aList in lists
+                repeat with aReminder in reminders of aList
+                    if id of aReminder is "{escaped_id}" then
+                        set targetReminder to aReminder
+                        exit repeat
+                    end if
+                end repeat
+                if targetReminder is not missing value then
+                    exit repeat
+                end if
+            end repeat
+            if targetReminder is missing value then
+                error "reminder not found: {escaped_id}"
+            end if
+            {action_block}
+        end tell
+        "#
+    )
+}
+
 fn build_list_script(list_filter: Option<&str>) -> String {
     let list_filter_block = match list_filter {
         Some(name) => {
@@ -152,6 +220,7 @@ fn build_list_script(list_filter: Option<&str>) -> String {
             repeat with aList in targetLists
                 set listName to my encode_field(name of aList)
                 repeat with aReminder in reminders of aList
+                    set reminderId to my encode_field(id of aReminder)
                     set reminderTitle to my encode_field(name of aReminder)
                     if body of aReminder is missing value then
                         set reminderNotes to ""
@@ -168,7 +237,7 @@ fn build_list_script(list_filter: Option<&str>) -> String {
                     else
                         set reminderCompleted to "false"
                     end if
-                    set output to output & reminderTitle & tab & reminderNotes & tab & reminderDue & tab & reminderCompleted & tab & listName & "{REMINDER_SEPARATOR}"
+                    set output to output & reminderId & tab & reminderTitle & tab & reminderNotes & tab & reminderDue & tab & reminderCompleted & tab & listName & "{REMINDER_SEPARATOR}"
                 end repeat
             end repeat
             return output
@@ -214,6 +283,7 @@ fn build_today_script(from: &str, to: &str) -> String {
                 set listName to my encode_field(name of aList)
                 set matchingReminders to (reminders of aList whose due date is not missing value and due date is greater than or equal to fromDate and due date is less than or equal to toDate)
                 repeat with aReminder in matchingReminders
+                    set reminderId to my encode_field(id of aReminder)
                     set reminderTitle to my encode_field(name of aReminder)
                     if body of aReminder is missing value then
                         set reminderNotes to ""
@@ -226,7 +296,7 @@ fn build_today_script(from: &str, to: &str) -> String {
                     else
                         set reminderCompleted to "false"
                     end if
-                    set output to output & reminderTitle & tab & reminderNotes & tab & reminderDue & tab & reminderCompleted & tab & listName & "{REMINDER_SEPARATOR}"
+                    set output to output & reminderId & tab & reminderTitle & tab & reminderNotes & tab & reminderDue & tab & reminderCompleted & tab & listName & "{REMINDER_SEPARATOR}"
                 end repeat
             end repeat
             return output
@@ -264,21 +334,145 @@ pub fn today() -> Result<Vec<ReminderItem>, MacosError> {
     Ok(parse_reminders_output(&stdout))
 }
 
+fn resolve_selector(selector: ReminderSelector) -> Result<String, MacosError> {
+    match selector {
+        ReminderSelector::Id(id) => Ok(id),
+        ReminderSelector::Title(title) => {
+            let matches = list(None)?
+                .into_iter()
+                .filter(|reminder| reminder.title == title)
+                .collect::<Vec<_>>();
+            match matches.len() {
+                0 => Err(MacosError::Other(format!("reminder not found: {title}"))),
+                1 => Ok(matches[0].id.clone()),
+                count => Err(MacosError::Other(format!(
+                    "reminder title is ambiguous: {title} ({count} matches)"
+                ))),
+            }
+        }
+    }
+}
+
+/// Create a reminder in Apple Reminders.
+pub fn create_reminder(
+    title: &str,
+    notes: &str,
+    list: &str,
+    due: Option<DateTime<Local>>,
+    priority: Option<u8>,
+) -> Result<(), MacosError> {
+    let escaped_title = escape(title);
+    let notes_expr = escape_body(notes);
+    let target_list_block = build_list_lookup_block(list);
+    let due_block = due
+        .as_ref()
+        .map(|due| applescript_date_block("dueDate", due))
+        .unwrap_or_default();
+    let due_prop = if due.is_some() {
+        ", due date:dueDate".to_string()
+    } else {
+        String::new()
+    };
+    let priority_prop = priority
+        .map(|priority| format!(", priority:{priority}"))
+        .unwrap_or_default();
+
+    let script = format!(
+        r#"
+        {due_block}
+        tell application "Reminders"
+            {target_list_block}
+            make new reminder at targetList with properties {{name:"{escaped_title}", body:{notes_expr}{due_prop}{priority_prop}}}
+        end tell
+        "#
+    );
+
+    run(&script, "failed to create reminder")
+}
+
+/// Mark a reminder complete by id or unique title.
+pub fn complete_reminder(selector: ReminderSelector) -> Result<(), MacosError> {
+    let reminder_id = resolve_selector(selector)?;
+    let script = build_reminder_lookup_script(&reminder_id, "set completed of targetReminder to true");
+
+    run(&script, "failed to complete reminder")
+}
+
+/// Delete a reminder by id or unique title.
+pub fn delete_reminder(selector: ReminderSelector) -> Result<(), MacosError> {
+    let reminder_id = resolve_selector(selector)?;
+    let script = build_reminder_lookup_script(&reminder_id, "delete targetReminder");
+
+    run(&script, "failed to delete reminder")
+}
+
+/// Update a reminder by id or unique title.
+pub fn update_reminder(
+    selector: ReminderSelector,
+    new_title: Option<&str>,
+    due: Option<DateTime<Local>>,
+    notes: Option<&str>,
+    list: Option<&str>,
+    priority: Option<u8>,
+) -> Result<(), MacosError> {
+    if new_title.is_none() && due.is_none() && notes.is_none() && list.is_none() && priority.is_none() {
+        return Err(MacosError::Other("no reminder updates specified".to_string()));
+    }
+
+    let reminder_id = resolve_selector(selector)?;
+    let due_block = due
+        .as_ref()
+        .map(|due| applescript_date_block("dueDate", due))
+        .unwrap_or_default();
+
+    let mut actions = Vec::new();
+    if let Some(new_title) = new_title {
+        actions.push(format!(r#"set name of targetReminder to "{}""#, escape(new_title)));
+    }
+    if due.is_some() {
+        actions.push("set due date of targetReminder to dueDate".to_string());
+    }
+    if let Some(notes) = notes {
+        actions.push(format!(
+            "set body of targetReminder to {}",
+            escape_body(notes)
+        ));
+    }
+    if let Some(priority) = priority {
+        actions.push(format!("set priority of targetReminder to {priority}"));
+    }
+    if let Some(list) = list {
+        actions.push(build_list_lookup_block(list));
+        actions.push("move targetReminder to targetList".to_string());
+    }
+
+    let script = format!(
+        r#"
+        {due_block}
+        {lookup}
+        "#,
+        lookup = build_reminder_lookup_script(&reminder_id, &actions.join("\n            ")),
+    );
+
+    run(&script, "failed to update reminder")
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Local, TimeZone};
 
     use super::{
-        REMINDER_SEPARATOR, build_list_script, build_today_script, parse_reminder_line,
-        parse_reminders_output,
+        REMINDER_SEPARATOR, build_list_script, build_reminder_lookup_script, build_today_script,
+        parse_reminder_line, parse_reminders_output,
     };
 
     #[test]
     fn parse_reminder_line_unescapes_fields() {
-        let line = "Buy\\tmilk\tLine 1\\nLine 2\t2026-04-11T08:00:00Z\tfalse\tWork";
+        let line = "reminder-id\tBuy\\tmilk\tLine 1\\nLine 2\t2026-04-11T08:00:00Z\tfalse\tWork";
 
         let reminder = parse_reminder_line(line).expect("reminder");
 
+        assert_eq!(reminder.id, "reminder-id");
         assert_eq!(reminder.title, "Buy\tmilk");
         assert_eq!(reminder.notes, "Line 1\nLine 2");
         assert_eq!(reminder.due_date.as_deref(), Some("2026-04-11T08:00:00Z"));
@@ -289,15 +483,17 @@ mod tests {
     #[test]
     fn parse_reminders_output_keeps_multiple_items() {
         let raw = concat!(
-            "One\t\t\tfalse\tInbox---REMINDER_SEP---",
-            "Two\tNotes\t2026-04-11T08:00:00Z\ttrue\tWork---REMINDER_SEP---"
+            "id-1\tOne\t\t\tfalse\tInbox---REMINDER_SEP---",
+            "id-2\tTwo\tNotes\t2026-04-11T08:00:00Z\ttrue\tWork---REMINDER_SEP---"
         );
 
         let reminders = parse_reminders_output(raw);
 
         assert_eq!(reminders.len(), 2);
+        assert_eq!(reminders[0].id, "id-1");
         assert_eq!(reminders[0].title, "One");
         assert_eq!(reminders[0].due_date, None);
+        assert_eq!(reminders[1].id, "id-2");
         assert_eq!(reminders[1].title, "Two");
         assert_eq!(reminders[1].list_name, "Work");
     }
@@ -319,13 +515,14 @@ mod tests {
         assert!(!today_script.contains("class isot"));
         assert!(list_script.contains("format_reminder_date"));
         assert!(today_script.contains("format_reminder_date"));
+        assert!(list_script.contains("set reminderId to my encode_field(id of aReminder)"));
         assert!(list_script.contains("set reminderCompleted to \"true\""));
         assert!(today_script.contains("set matchingReminders to"));
     }
 
     #[test]
     fn parse_reminder_line_unescapes_separator_escape() {
-        let line = "One\tContains\\sMarker\t\ttrue\tInbox";
+        let line = "id-1\tOne\tContains\\sMarker\t\ttrue\tInbox";
 
         let reminder = parse_reminder_line(line).expect("reminder");
 
@@ -333,5 +530,13 @@ mod tests {
             reminder.notes,
             format!("Contains{REMINDER_SEPARATOR}Marker")
         );
+    }
+
+    #[test]
+    fn reminder_lookup_script_matches_id() {
+        let script = build_reminder_lookup_script("reminder-id", "delete targetReminder");
+
+        assert!(script.contains(r#"if id of aReminder is "reminder-id" then"#));
+        assert!(script.contains("delete targetReminder"));
     }
 }

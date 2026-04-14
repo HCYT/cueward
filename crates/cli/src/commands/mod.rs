@@ -21,6 +21,8 @@ mod notes_tests;
 #[cfg(test)]
 mod reddit_tests;
 #[cfg(test)]
+mod reminders_tests;
+#[cfg(test)]
 mod safari_ai_tests;
 #[cfg(test)]
 mod safari_bookmarks_tests;
