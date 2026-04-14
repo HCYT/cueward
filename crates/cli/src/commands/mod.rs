@@ -17,6 +17,8 @@ pub(crate) mod search;
 pub(crate) mod send;
 pub(crate) mod triage;
 #[cfg(test)]
+mod calendar_tests;
+#[cfg(test)]
 mod notes_tests;
 #[cfg(test)]
 mod reddit_tests;
