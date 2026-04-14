@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `cueward stickies` list/create/update/delete commands on macOS using AppleScript automation against the Stickies app.
+**Goal:** Add `cueward stickies` list/create/update/delete commands on macOS using the Stickies container data files.
 
-**Architecture:** Keep Stickies isolated as its own adapter module and top-level CLI command rather than mixing it into notes or quick notes. Implement a read model for Stickies notes plus a pragmatic first-version identifier strategy: use the most stable app-visible key available, and fall back to an application-level fingerprint only if AppleScript cannot expose a usable note identifier. Keep this batch focused on plain-text title/body CRUD only.
+**Architecture:** Keep Stickies isolated as its own adapter module and top-level CLI command. Read metadata from `.SavedStickiesState`, use `UUID` as the stable `id`, and read/write content through each `<UUID>.rtfd/TXT.rtf`. Keep this batch focused on plain-text title/body CRUD only.
 
-**Tech Stack:** Rust 2024, `clap`, AppleScript via `osascript`, `serde`/`serde_json`, `cargo test`
+**Tech Stack:** Rust 2024, `clap`, plist parsing, file I/O, `textutil`, `serde`/`serde_json`, `cargo test`
 
 ---
 
 ## Chunk 1: CLI Contract
 
-### Task 1: Define the `stickies` CLI surface with failing parse tests
+### Task 1: Define the `stickies` CLI surface
 
 **Files:**
 - Modify: `crates/cli/src/commands/mod.rs`
@@ -21,110 +21,27 @@
 
 - [ ] **Step 1: Write the failing CLI parse tests**
 
-Add tests covering:
+Cover:
+- `stickies list`
+- `stickies create --title --body`
+- `stickies update --id --title/--body`
+- `stickies delete --id`
 
-```rust
-#[test]
-fn cli_parses_stickies_list() {
-    let cli = Cli::try_parse_from(["cueward", "stickies", "list"])
-        .expect("parse stickies list");
-
-    match cli.command {
-        Command::Stickies {
-            action: StickiesAction::List,
-        } => {}
-        _ => panic!("unexpected command"),
-    }
-}
-
-#[test]
-fn cli_parses_stickies_create() {
-    let cli = Cli::try_parse_from([
-        "cueward",
-        "stickies",
-        "create",
-        "--title",
-        "臨時待辦",
-        "--body",
-        "記得回覆客戶",
-    ])
-    .expect("parse stickies create");
-
-    match cli.command {
-        Command::Stickies {
-            action: StickiesAction::Create { title, body },
-        } => {
-            assert_eq!(title, "臨時待辦");
-            assert_eq!(body, "記得回覆客戶");
-        }
-        _ => panic!("unexpected command"),
-    }
-}
-
-#[test]
-fn cli_parses_stickies_update() {
-    let cli = Cli::try_parse_from([
-        "cueward",
-        "stickies",
-        "update",
-        "--id",
-        "sticky-1",
-        "--title",
-        "新標題",
-        "--body",
-        "更新後內容",
-    ])
-    .expect("parse stickies update");
-
-    match cli.command {
-        Command::Stickies {
-            action: StickiesAction::Update { id, title, body },
-        } => {
-            assert_eq!(id, "sticky-1");
-            assert_eq!(title.as_deref(), Some("新標題"));
-            assert_eq!(body.as_deref(), Some("更新後內容"));
-        }
-        _ => panic!("unexpected command"),
-    }
-}
-
-#[test]
-fn cli_parses_stickies_delete() {
-    let cli = Cli::try_parse_from([
-        "cueward",
-        "stickies",
-        "delete",
-        "--id",
-        "sticky-1",
-    ])
-    .expect("parse stickies delete");
-
-    match cli.command {
-        Command::Stickies {
-            action: StickiesAction::Delete { id },
-        } => assert_eq!(id, "sticky-1"),
-        _ => panic!("unexpected command"),
-    }
-}
-```
-
-- [ ] **Step 2: Run the CLI tests to verify they fail**
+- [ ] **Step 2: Run the CLI tests and verify they fail**
 
 Run:
 `cargo test -p cueward-cli cli_parses_stickies -- --nocapture`
 
 Expected: FAIL because `Command::Stickies` / `StickiesAction` do not exist yet.
 
-- [ ] **Step 3: Add the minimal CLI enums and dispatch stubs**
+- [ ] **Step 3: Add the minimal CLI enums and dispatch stub**
 
 Implement:
 - `Command::Stickies { action: StickiesAction }`
 - `StickiesAction::{List, Create, Update, Delete}`
-- `crates/cli/src/commands/stickies.rs` with a `dispatch()` function matching existing command modules
+- `crates/cli/src/commands/stickies.rs`
 
-Keep dispatch compiling even if adapter calls are still stubbed.
-
-- [ ] **Step 4: Re-run the CLI tests to verify they pass**
+- [ ] **Step 4: Re-run the CLI tests and verify they pass**
 
 Run:
 `cargo test -p cueward-cli cli_parses_stickies -- --nocapture`
@@ -138,156 +55,98 @@ git add crates/cli/src/commands/mod.rs crates/cli/src/commands/stickies.rs crate
 git commit -m "test: define stickies cli contract"
 ```
 
-## Chunk 2: Stickies Read Model And Identifier Strategy
+## Chunk 2: Read Model And State Parsing
 
-### Task 2: Implement list/read with a stable first-version identifier
+### Task 2: Implement list/read from Stickies container files
 
 **Files:**
 - Modify: `crates/adapter-macos/src/lib.rs`
 - Create: `crates/adapter-macos/src/stickies.rs`
 
-- [ ] **Step 1: Write the failing adapter tests for decoding and identifier behavior**
+- [ ] **Step 1: Write the failing adapter tests**
 
-Add tests in `crates/adapter-macos/src/stickies.rs` for:
+Cover:
+- parsing `.SavedStickiesState` yields UUID entries
+- title fallback from body first line
+- reading `TXT.rtf` via `textutil` path
+- `update` validation requires at least one field
 
-```rust
-#[test]
-fn parse_stickies_output_keeps_title_body_and_id() {
-    let raw = "sticky-1\t臨時待辦\t記得回覆客戶---STICKY_SEP---";
-
-    let notes = parse_stickies_output(raw);
-
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].id, "sticky-1");
-    assert_eq!(notes[0].title, "臨時待辦");
-    assert_eq!(notes[0].body, "記得回覆客戶");
-}
-
-#[test]
-fn parse_stickies_output_falls_back_when_title_missing() {
-    let raw = "sticky-1\t\t只有內容---STICKY_SEP---";
-
-    let notes = parse_stickies_output(raw);
-
-    assert_eq!(notes.len(), 1);
-    assert!(!notes[0].title.is_empty());
-}
-```
-
-Also cover:
-- escaping/unescaping tab/newline/record separator
-- update validation requires at least one field
-
-- [ ] **Step 2: Run the adapter tests to verify they fail**
+- [ ] **Step 2: Run the adapter tests and verify they fail**
 
 Run:
 `cargo test -p cueward-adapter-macos stickies -- --nocapture`
 
 Expected: FAIL because the module and parser do not exist yet.
 
-- [ ] **Step 3: Implement the read model and parser**
+- [ ] **Step 3: Implement the read model**
 
 Create:
 - `StickiesNote { id, title, body }`
+- parser for `.SavedStickiesState`
+- `derive_sticky_title()`
+- `read_sticky_body()`
+- `list_stickies()`
 
-Implement:
-- output separator constants like reminders/calendar
-- field escape/decode helpers reusing `applescript.rs` primitives where possible
-- `parse_stickies_output()`
-- `ensure_update_fields()` or equivalent validator
+Rules:
+- `id` = UUID from state
+- if body file missing, skip that note with explicit internal handling
+- title fallback = first non-empty body line, else `Sticky <UUID-prefix>`
 
-Identifier rule:
-- First try to read a real app-level key from AppleScript
-- If unavailable, generate a deterministic fallback fingerprint from the note’s visible fields in a way that survives a list → update/delete round-trip during normal use
-
-- [ ] **Step 4: Add the AppleScript list builder**
-
-Build a list script that:
-- opens `tell application "Stickies"`
-- enumerates all notes/windows
-- emits `id`, `title`, `body`
-- leaves title empty if app provides none so Rust fallback logic owns the default label
-
-Do not add create/update/delete yet.
-
-- [ ] **Step 5: Re-run the adapter tests**
+- [ ] **Step 4: Re-run the adapter tests**
 
 Run:
 `cargo test -p cueward-adapter-macos stickies -- --nocapture`
 
-Expected: PASS for parser and validation tests.
+Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add crates/adapter-macos/src/lib.rs crates/adapter-macos/src/stickies.rs
 git commit -m "feat: add stickies read model"
 ```
 
-## Chunk 3: Create / Update / Delete Operations
+## Chunk 3: File-Based CRUD
 
-### Task 3: Implement Stickies CRUD operations behind the adapter
+### Task 3: Implement create/update/delete using state plist + rtfd directory
 
 **Files:**
 - Modify: `crates/adapter-macos/src/stickies.rs`
 - Modify: `crates/cli/src/commands/stickies.rs`
 
-- [ ] **Step 1: Write failing operation tests**
+- [ ] **Step 1: Write failing CRUD tests**
 
-Add unit tests for the script builders:
-
-```rust
-#[test]
-fn create_sticky_script_escapes_multiline_body() {
-    let script = build_create_script("臨時待辦", "line1\nline2");
-
-    assert!(script.contains(r#"make new note"#));
-    assert!(script.contains("\"line1\" & linefeed & \"line2\""));
-}
-
-#[test]
-fn update_sticky_script_targets_id() {
-    let script = build_update_script("sticky-1", Some("新標題"), Some("更新後內容"))
-        .expect("script");
-
-    assert!(script.contains("sticky-1"));
-    assert!(script.contains("新標題"));
-    assert!(script.contains("更新後內容"));
-}
-
-#[test]
-fn update_sticky_script_requires_title_or_body() {
-    let err = build_update_script("sticky-1", None, None).unwrap_err();
-    assert!(err.to_string().contains("no sticky updates specified"));
-}
-```
+Cover:
+- create writes a new UUID entry to state and creates `<UUID>.rtfd/TXT.rtf`
+- update rewrites title/body for a given `id`
+- delete removes both the state entry and the `UUID.rtfd`
+- update without title/body fails
 
 - [ ] **Step 2: Run the targeted tests to verify they fail**
 
 Run:
-`cargo test -p cueward-adapter-macos sticky_ -- --nocapture`
+`cargo test -p cueward-adapter-macos stickies -- --nocapture`
 
-Expected: FAIL because operation builders and adapter functions are missing.
+Expected: FAIL because file mutation helpers are missing.
 
-- [ ] **Step 3: Implement create/update/delete in the adapter**
+- [ ] **Step 3: Implement create/update/delete**
 
-Add functions:
-- `list_stickies() -> Result<Vec<StickiesNote>, MacosError>`
-- `create_sticky(title: &str, body: &str) -> Result<StickiesNote, MacosError>`
-- `update_sticky(id: &str, title: Option<&str>, body: Option<&str>) -> Result<StickiesNote, MacosError>`
-- `delete_sticky(id: &str) -> Result<(), MacosError>`
+Implement:
+- `create_sticky(title, body)`
+- `update_sticky(id, title, body)`
+- `delete_sticky(id)`
 
 Rules:
-- update/delete must resolve by `id`
+- mutate state plist without dropping unrelated metadata
+- write RTF content through `textutil` conversion or equivalent minimal path
 - not found → explicit error
-- ambiguous resolution → explicit error
-- create/update should return the post-operation note shape if practical; if not, CLI may emit the requested payload plus `updated: true`
+- invalid id → explicit error
 
-- [ ] **Step 4: Wire CLI dispatch to adapter**
+- [ ] **Step 4: Wire CLI dispatch**
 
 In `crates/cli/src/commands/stickies.rs`:
 - `list` prints JSON array
-- `create` / `update` / `delete` print structured JSON matching the spec
+- `create` / `update` / `delete` print structured JSON
 - failures go to stderr and exit 1
 
 - [ ] **Step 5: Re-run targeted tests**
@@ -305,9 +164,9 @@ git add crates/adapter-macos/src/stickies.rs crates/cli/src/commands/stickies.rs
 git commit -m "feat: add stickies crud operations"
 ```
 
-## Chunk 4: Full Verification And Output Sanity
+## Chunk 4: Full Verification
 
-### Task 4: Verify the whole feature end to end at the code level
+### Task 4: Verify the whole feature
 
 **Files:**
 - Modify only if implementation drift requires docs alignment:
@@ -322,20 +181,19 @@ Run:
 
 Expected: PASS
 
-- [ ] **Step 2: Confirm success criteria against the issue**
+- [ ] **Step 2: Confirm success criteria**
 
-Check explicitly:
-- `stickies list` has `id/title/body`
-- `stickies create` exists
-- `stickies update` refuses empty updates
-- `stickies delete` resolves by `id`
-- no-title notes do not break list output
+Check:
+- `stickies list` returns `id/title/body`
+- create/update/delete all work by UUID
+- missing title does not break output
+- implementation uses container data files, not GUI scripting
 
 - [ ] **Step 3: Prepare PR summary**
 
-PR summary should call out:
-- first-version `id` strategy used
-- plain-text-only scope
-- what was intentionally deferred (style/position/rich text)
+Call out:
+- UUID-based `id`
+- plain-text scope via `TXT.rtf`
+- deferred items: color/position/rich text fidelity
 
 Plan complete and saved to `docs/plans/2026-04-15-stickies-crud.md`. Ready to execute?

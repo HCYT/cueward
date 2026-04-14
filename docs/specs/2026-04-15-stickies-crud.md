@@ -7,9 +7,25 @@
 需求重點：
 
 - 先支援 list / create / update / delete
-- 以 AppleScript 直接控制 Stickies app
+- 第一版改走 Stickies 容器資料檔，不依賴 GUI scripting
+- `id` 直接使用 Stickies state 裡的 `UUID`
 - 第一版只處理純文字 title / body
 - 先不處理顏色、字型、視窗位置、富文字格式
+
+## 資料來源
+
+Stickies 本機資料落點：
+
+- `~/Library/Containers/com.apple.Stickies/Data/Library/Stickies/.SavedStickiesState`
+- `~/Library/Containers/com.apple.Stickies/Data/Library/Stickies/<UUID>.rtfd/TXT.rtf`
+
+其中：
+
+- `.SavedStickiesState` 保留每張便條紙的 `UUID` 與視窗/顏色等 metadata
+- 文字內容存在對應的 `TXT.rtf`
+- 可透過 `textutil -convert txt -stdout <TXT.rtf>` 取純文字
+
+第一版以這兩個來源為準，不走 `System Events` UI scripting。
 
 ## CLI
 
@@ -30,31 +46,24 @@ cueward stickies delete --id <sticky-id>
   - 若 title 缺失，回傳可讀的 fallback label
 - `create`
   - 需要 `--title` 與 `--body`
-  - 會建立一張新的便條紙
+  - 建立新的 `UUID.rtfd` 與 state entry
 - `update`
   - 需要 `--id`
   - `--title`、`--body` 至少一個
+  - 只改目標 note 的內容，保留其他 state 欄位
 - `delete`
   - 需要 `--id`
+  - 刪除 state entry 與對應的 `UUID.rtfd`
 
 ## Identifier 策略
 
-Stickies 不保證提供像 Notes DB 那樣的穩定 UUID。
+第一版 `id` 直接使用 `.SavedStickiesState` 的 `UUID`。
 
-第一版採「AppleScript 可取到的最穩定 key」策略：
+好處：
 
-- 若 app object 有可直接讀取的 unique id / name 組合，可直接使用
-- 若沒有，使用 list 結果中可穩定重建的 fingerprint
-- `id` 必須能在同一次 session 與一般日常操作中穩定對應到同一張便條紙
-
-若發現 AppleScript 沒有足夠穩定的 key，第一版可退一步定義為：
-
-- `id = normalized(title + body prefix + index)` 類型的應用層 fingerprint
-
-但必須保證：
-
-- `list` 回來的 `id` 能直接餵給 `update` / `delete`
-- 找不到目標時回傳明確錯誤，不默默操作錯誤便條紙
+- 不需要猜 AppleScript object identity
+- `list` / `update` / `delete` 可穩定 round-trip
+- 和資料檔命名一致
 
 ## 輸出格式
 
@@ -63,7 +72,7 @@ Stickies 不保證提供像 Notes DB 那樣的穩定 UUID。
 ```json
 [
   {
-    "id": "sticky-1",
+    "id": "DF260009-9714-421B-BB65-D2B413C55F46",
     "title": "臨時待辦",
     "body": "記得回覆客戶"
   }
@@ -76,7 +85,7 @@ Stickies 不保證提供像 Notes DB 那樣的穩定 UUID。
 {
   "created": true,
   "sticky": {
-    "id": "sticky-1",
+    "id": "DF260009-9714-421B-BB65-D2B413C55F46",
     "title": "臨時待辦",
     "body": "記得回覆客戶"
   }
@@ -89,7 +98,7 @@ Stickies 不保證提供像 Notes DB 那樣的穩定 UUID。
 {
   "updated": true,
   "sticky": {
-    "id": "sticky-1",
+    "id": "DF260009-9714-421B-BB65-D2B413C55F46",
     "title": "新標題",
     "body": "更新後內容"
   }
@@ -101,7 +110,7 @@ Stickies 不保證提供像 Notes DB 那樣的穩定 UUID。
 ```json
 {
   "deleted": true,
-  "id": "sticky-1"
+  "id": "DF260009-9714-421B-BB65-D2B413C55F46"
 }
 ```
 
@@ -113,9 +122,10 @@ Stickies 不保證提供像 Notes DB 那樣的穩定 UUID。
 
 責任：
 
-- 建 AppleScript
-- 執行 Stickies CRUD
-- 將 Stickies app 輸出 decode 成 Rust struct
+- 解析 `.SavedStickiesState`
+- 讀取 / 改寫 `TXT.rtf`
+- 建立 / 刪除 `UUID.rtfd`
+- 將檔案內容映射成 Rust struct
 
 CLI 端：
 
@@ -125,36 +135,47 @@ CLI 端：
 不把 Stickies 混進 `notes.rs` 或 `quick_notes.rs`：
 
 - 它是不同 app
-- 生命週期和資料模型不同
+- 底層資料模型不同
 - repo 規則偏向每個功能領域一個模組
 
-## AppleScript 介面
+## 實作策略
 
-第一版預期模式：
+### list / read
 
-- `tell application "Stickies"`
-- 讀取每張 note / window 的 title 與 body
-- 針對 create / update / delete 走同一條 app automation 路徑
+- 讀 `.SavedStickiesState`
+- 對每個 `UUID` 找 `UUID.rtfd/TXT.rtf`
+- 用 `textutil` 轉成純文字
+- title fallback：
+  - 若 state 中未來發現可用 title 欄位，用它
+  - 否則取 body 第一個非空白行
+  - 再不行就用 `Sticky <UUID-prefix>`
 
-共用 pattern：
+### create / update
 
-- 使用 `applescript.rs` 裡現有 `escape` / `escape_body` / `run` / `run_capture`
-- 若需要 timestamp/date formatting，再抽共用 helper，不複製邏輯
+- body 寫回 `TXT.rtf`
+- 可透過 `textutil` 把純文字轉成 RTF
+- state plist 只補 / 改必要欄位，避免洗掉其他 UI metadata
+
+### delete
+
+- 從 state 移除該 `UUID`
+- 刪除對應 `UUID.rtfd`
 
 ## 錯誤處理
 
 明確區分：
 
-- `stickies not found`
+- `stickies state not found`
+- `sticky body not found`
 - `sticky not found`
-- `sticky id ambiguous`
 - `invalid sticky id`
+- `no sticky updates specified`
 - `create failed`
 - `update failed`
 - `delete failed`
-
-若 Stickies 沒開啟但 AppleScript 可喚起 app，允許自動喚起。
-若系統權限阻擋，錯誤訊息要能讓使用者知道是 Automation / Apple Events 權限問題。
+- `textutil failed`
+- `plist decode failed`
+- `plist write failed`
 
 ## 測試
 
@@ -165,15 +186,16 @@ CLI 端：
   - `stickies create`
   - `stickies update`
   - `stickies delete`
-- AppleScript builder / parser tests：
-  - list script 會抓 title/body
-  - update script 至少要求一個更新欄位
-  - delete / update 用 `id` 對應目標
-- 若實作中有 fallback id/fingerprint，補 unit test 驗證穩定性
+- adapter tests：
+  - parse `.SavedStickiesState`
+  - title fallback
+  - 讀 `TXT.rtf`
+  - update 至少要求一個欄位
+  - create/update/delete 對 tempdir 中的 state + rtfd 做 mutation
 
 第一版不要求：
 
-- 真機整合測試自動化
+- 真機 GUI 同步驗證
 - 顏色 / 視窗 frame round-trip
 
 ## 驗收條件
