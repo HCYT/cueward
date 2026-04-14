@@ -2,7 +2,7 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 
 use crate::MacosError;
-use crate::applescript::{escape, escape_body, run, run_capture};
+use crate::applescript::{applescript_date_block, escape, escape_body, run, run_capture};
 
 const EVENT_SEPARATOR: &str = "---EVENT_SEP---";
 
@@ -15,28 +15,6 @@ pub struct CalendarEvent {
     pub location: String,
     pub notes: String,
     pub all_day: bool,
-}
-
-/// Build an AppleScript snippet that constructs a date object locale-independently.
-/// Returns a variable assignment like: `set varName to current date \n set year of varName to ...`
-fn applescript_date_block(var_name: &str, dt: &DateTime<Local>) -> String {
-    format!(
-        r#"set {var_name} to current date
-            set day of {var_name} to 1
-            set year of {var_name} to {y}
-            set month of {var_name} to {m}
-            set day of {var_name} to {d}
-            set hours of {var_name} to {h}
-            set minutes of {var_name} to {min}
-            set seconds of {var_name} to {s}"#,
-        var_name = var_name,
-        y = dt.format("%Y"),
-        m = dt.format("%-m"),
-        d = dt.format("%-d"),
-        h = dt.format("%-H"),
-        min = dt.format("%-M"),
-        s = dt.format("%-S"),
-    )
 }
 
 fn decode_field(value: &str) -> String {
