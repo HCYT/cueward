@@ -198,7 +198,7 @@ fn enrich_cues_with_attachments_emits_unresolved_when_no_media_matches() {
         metadata: HashMap::new(),
     }];
 
-    super::enrich_cues_with_attachments(&mut cues, &[], &[], &[], &[]);
+    super::enrich_cues_with_attachments(&mut cues, &[], &[], &[], &[], &[]);
 
     assert_eq!(cues[0].attachment_segments.len(), 1);
     assert!(matches!(
@@ -229,7 +229,7 @@ fn enrich_cues_with_attachments_emits_unresolved_when_match_has_no_attachments()
         attachments: Vec::new(),
     }];
 
-    super::enrich_cues_with_attachments(&mut cues, &media_notes, &[], &[], &[]);
+    super::enrich_cues_with_attachments(&mut cues, &media_notes, &[], &[], &[], &[]);
 
     assert_eq!(cues[0].attachment_segments.len(), 2);
     assert!(cues[0]
@@ -273,7 +273,14 @@ fn enrich_cues_with_attachments_combines_media_and_web_preview_segments() {
         }],
     }];
 
-    super::enrich_cues_with_attachments(&mut cues, &media_notes, &web_preview_notes, &[], &[]);
+    super::enrich_cues_with_attachments(
+        &mut cues,
+        &media_notes,
+        &web_preview_notes,
+        &[],
+        &[],
+        &[],
+    );
 
     assert_eq!(
         cues[0].content,
@@ -316,7 +323,7 @@ fn enrich_cues_with_map_emits_structured_map_segment() {
         }],
     }];
 
-    super::enrich_cues_with_attachments(&mut cues, &[], &[], &map_notes, &[]);
+    super::enrich_cues_with_attachments(&mut cues, &[], &[], &map_notes, &[], &[]);
 
     assert_eq!(cues[0].content, "[Attachment 1: 屏東縣立棒球場]");
     assert_eq!(cues[0].attachment_segments.len(), 1);
@@ -370,7 +377,7 @@ fn enrich_cues_with_attachments_combines_media_and_map_segments() {
         }],
     }];
 
-    super::enrich_cues_with_attachments(&mut cues, &media_notes, &[], &map_notes, &[]);
+    super::enrich_cues_with_attachments(&mut cues, &media_notes, &[], &map_notes, &[], &[]);
 
     assert_eq!(
         cues[0].content,
@@ -414,7 +421,7 @@ fn enrich_cues_with_pdf_emits_file_backed_pdf_segment() {
         }],
     }];
 
-    super::enrich_cues_with_attachments(&mut cues, &[], &[], &[], &file_backed_notes);
+    super::enrich_cues_with_attachments(&mut cues, &[], &[], &[], &file_backed_notes, &[]);
 
     assert_eq!(cues[0].content, "[Attachment 1: SK-INFLUX [V MB]_DS_C0919.pdf]");
     assert_eq!(cues[0].attachment_segments.len(), 1);
@@ -458,7 +465,7 @@ fn enrich_cues_with_binary_emits_file_backed_binary_segment() {
         }],
     }];
 
-    super::enrich_cues_with_attachments(&mut cues, &[], &[], &[], &file_backed_notes);
+    super::enrich_cues_with_attachments(&mut cues, &[], &[], &[], &file_backed_notes, &[]);
 
     assert_eq!(
         cues[0].content,
@@ -476,6 +483,59 @@ fn enrich_cues_with_binary_emits_file_backed_binary_segment() {
     assert_eq!(
         cues[0].attachment_segments[0].sha256.as_deref(),
         Some("def456")
+    );
+    assert!(!cues[0].attachment_segments[0].has_ocr);
+}
+
+#[test]
+fn enrich_cues_with_audio_emits_audio_segment_and_transcript() {
+    let timestamp = Utc.with_ymd_and_hms(2026, 4, 14, 5, 29, 52).unwrap();
+    let mut cues = vec![Cue {
+        source: CueSource::Notes,
+        timestamp,
+        content: "[Attachment]".into(),
+        url: None,
+        title: Some("voai-test.wav".into()),
+        tags: Vec::new(),
+        attachment_segments: Vec::new(),
+        metadata: HashMap::new(),
+    }];
+    let audio_notes = vec![crate::notes::AudioNote {
+        timestamp: timestamp.timestamp(),
+        title: Some("voai-test.wav".into()),
+        attachments: vec![crate::notes::AudioAttachment {
+            title: Some("voai-test.wav".into()),
+            filename: "voai-test.wav".into(),
+            path: PathBuf::from("/tmp/voai-test.wav"),
+            sha256: Some("audio123".into()),
+            duration_seconds: Some(3.769),
+            transcript_text: Some("老闆你好我是龍工這是語音測試。".into()),
+        }],
+    }];
+
+    super::enrich_cues_with_attachments(&mut cues, &[], &[], &[], &[], &audio_notes);
+
+    assert_eq!(
+        cues[0].content,
+        "[Attachment 1: voai-test.wav]\n\n[Attachment 1 Transcript: voai-test.wav]\n老闆你好我是龍工這是語音測試。"
+    );
+    assert_eq!(cues[0].attachment_segments.len(), 1);
+    assert!(matches!(
+        cues[0].attachment_segments[0].kind,
+        AttachmentKind::Audio
+    ));
+    assert_eq!(
+        cues[0].attachment_segments[0].path.as_deref(),
+        Some("/tmp/voai-test.wav")
+    );
+    assert_eq!(
+        cues[0].attachment_segments[0].sha256.as_deref(),
+        Some("audio123")
+    );
+    assert_eq!(cues[0].attachment_segments[0].duration_seconds, Some(3.769));
+    assert_eq!(
+        cues[0].attachment_segments[0].transcript_text.as_deref(),
+        Some("老闆你好我是龍工這是語音測試。")
     );
     assert!(!cues[0].attachment_segments[0].has_ocr);
 }

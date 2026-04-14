@@ -1,3 +1,4 @@
+mod audio;
 mod file_backed;
 mod web_preview;
 
@@ -13,6 +14,7 @@ use crate::MacosError;
 use super::{APPLE_EPOCH_OFFSET, MAX_MEDIA_SEARCH_DEPTH, MediaAttachment, MediaNote, home_dir};
 
 pub(super) use file_backed::load_file_backed_notes;
+pub(super) use audio::load_audio_notes;
 pub(super) use web_preview::{load_map_notes, load_web_preview_notes};
 
 pub(super) fn load_media_notes(since: DateTime<Utc>) -> Result<Vec<MediaNote>, MacosError> {
