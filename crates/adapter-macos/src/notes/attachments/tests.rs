@@ -539,3 +539,52 @@ fn enrich_cues_with_audio_emits_audio_segment_and_transcript() {
     );
     assert!(!cues[0].attachment_segments[0].has_ocr);
 }
+
+#[test]
+fn enrich_cues_with_media_and_audio_keeps_transcript_index_in_sync() {
+    let timestamp = Utc.with_ymd_and_hms(2026, 4, 14, 5, 29, 52).unwrap();
+    let mut cues = vec![Cue {
+        source: CueSource::Notes,
+        timestamp,
+        content: "[Attachment]\n[Attachment]".into(),
+        url: None,
+        title: Some("voai-test.wav".into()),
+        tags: Vec::new(),
+        attachment_segments: Vec::new(),
+        metadata: HashMap::new(),
+    }];
+    let media_notes = vec![MediaNote {
+        timestamp: timestamp.timestamp(),
+        title: Some("voai-test.wav".into()),
+        attachments: vec![MediaAttachment {
+            filename: "scan.jpg".into(),
+            path: PathBuf::from("/tmp/scan.jpg"),
+            sha256: Some("img123".into()),
+        }],
+    }];
+    let audio_notes = vec![crate::notes::AudioNote {
+        timestamp: timestamp.timestamp(),
+        title: Some("voai-test.wav".into()),
+        attachments: vec![crate::notes::AudioAttachment {
+            title: Some("voai-test.wav".into()),
+            filename: "voai-test.wav".into(),
+            path: PathBuf::from("/tmp/voai-test.wav"),
+            sha256: Some("audio123".into()),
+            duration_seconds: Some(3.769),
+            transcript_text: Some("老闆你好我是龍工這是語音測試。".into()),
+        }],
+    }];
+
+    super::enrich_cues_with_attachments(&mut cues, &media_notes, &[], &[], &[], &audio_notes);
+
+    assert_eq!(
+        cues[0].content,
+        "[Attachment 1: scan.jpg]\n[Attachment 2: voai-test.wav]\n\n[Attachment 2 Transcript: voai-test.wav]\n老闆你好我是龍工這是語音測試。"
+    );
+    assert_eq!(cues[0].attachment_segments.len(), 2);
+    assert!(matches!(
+        cues[0].attachment_segments[1].kind,
+        AttachmentKind::Audio
+    ));
+    assert_eq!(cues[0].attachment_segments[1].index, 2);
+}

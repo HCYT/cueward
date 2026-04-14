@@ -2,7 +2,6 @@ use cueward_core::{AttachmentKind, AttachmentSegment, Cue};
 
 use crate::notes::{AudioAttachment, AudioNote, MEDIA_MATCH_WINDOW_SECS};
 
-use super::image::compute_sha256;
 use super::match_key;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,17 +32,12 @@ pub(super) fn materialize_audio_attachments(
         .iter()
         .take(placeholder_count)
         .cloned()
-        .map(|mut attachment| {
-            if attachment.sha256.is_none() {
-                attachment.sha256 = compute_sha256(&attachment.path);
-            }
-            attachment
-        })
         .collect()
 }
 
 pub(super) fn collect_audio_transcript_blocks(
     attachments: &[AudioAttachment],
+    offset: usize,
     placeholder_count: usize,
 ) -> Vec<AudioTranscriptBlock> {
     attachments
@@ -57,7 +51,7 @@ pub(super) fn collect_audio_transcript_blocks(
             }
 
             Some(AudioTranscriptBlock {
-                index: idx + 1,
+                index: offset + idx + 1,
                 filename: attachment.filename.clone(),
                 text: text.to_string(),
             })

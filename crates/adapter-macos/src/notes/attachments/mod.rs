@@ -125,7 +125,7 @@ pub(crate) fn enrich_cues_with_attachments(
                         labels.extend(labels_for_audio(&attachments, remaining));
 
                         let transcript_blocks =
-                            collect_audio_transcript_blocks(&attachments, remaining);
+                            collect_audio_transcript_blocks(&attachments, segments.len(), remaining);
                         if !transcript_blocks.is_empty() {
                             cue.content = append_audio_transcripts(&cue.content, &transcript_blocks);
                         }

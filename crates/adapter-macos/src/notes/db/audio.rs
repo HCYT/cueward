@@ -7,8 +7,8 @@ use crate::MacosError;
 use crate::notes::{AudioAttachment, AudioNote};
 
 use super::{
-    apple_to_unix_timestamp, normalize_media_title, notes_group_container_path, open_notes_db,
-    resolve_media_path, since_apple_epoch,
+    apple_to_unix_timestamp, compute_sha256, normalize_media_title, notes_group_container_path,
+    open_notes_db, resolve_media_path, since_apple_epoch,
 };
 
 pub(crate) fn load_audio_notes(since: DateTime<Utc>) -> Result<Vec<AudioNote>, MacosError> {
@@ -119,7 +119,7 @@ fn load_audio_notes_from_conn(
         let timestamp = apple_to_unix_timestamp(modification_date);
         let note_key = (timestamp, normalize_media_title(note_title));
         let attachments = grouped.entry(note_key).or_default();
-        let key = filename;
+        let key = identifier;
         match attachments.remove(&key) {
             Some(existing) => {
                 attachments.insert(key, prefer_audio_attachment(existing, attachment));
@@ -132,14 +132,10 @@ fn load_audio_notes_from_conn(
 
     Ok(grouped
         .into_iter()
-        .map(|((timestamp, title), attachments)| {
-            let mut attachments = attachments.into_values().collect::<Vec<_>>();
-            attachments.sort_by(|left, right| left.filename.cmp(&right.filename));
-            AudioNote {
-                timestamp,
-                title,
-                attachments,
-            }
+        .map(|((timestamp, title), attachments)| AudioNote {
+            timestamp,
+            title,
+            attachments: collapse_duplicate_audio_attachments(attachments.into_values().collect()),
         })
         .collect())
 }
@@ -170,8 +166,8 @@ fn audio_attachment_from_row(
     Some(AudioAttachment {
         title: normalize_media_title(title),
         filename,
+        sha256: compute_sha256(&path),
         path,
-        sha256: None,
         duration_seconds: duration_seconds.filter(|value| *value > 0.0),
         transcript_text,
     })
@@ -200,6 +196,33 @@ fn prefer_audio_attachment(existing: AudioAttachment, candidate: AudioAttachment
     }
 }
 
+fn collapse_duplicate_audio_attachments(attachments: Vec<AudioAttachment>) -> Vec<AudioAttachment> {
+    let mut deduped: HashMap<String, AudioAttachment> = HashMap::new();
+
+    for attachment in attachments {
+        let key = audio_dedup_key(&attachment);
+        match deduped.remove(&key) {
+            Some(existing) => {
+                deduped.insert(key, prefer_audio_attachment(existing, attachment));
+            }
+            None => {
+                deduped.insert(key, attachment);
+            }
+        }
+    }
+
+    let mut attachments = deduped.into_values().collect::<Vec<_>>();
+    attachments.sort_by(|left, right| left.filename.cmp(&right.filename));
+    attachments
+}
+
+fn audio_dedup_key(attachment: &AudioAttachment) -> String {
+    match attachment.duration_seconds {
+        Some(duration) => format!("{}::{duration:.3}", attachment.filename),
+        None => format!("{}::none", attachment.filename),
+    }
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -219,7 +242,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use rusqlite::Connection;
 
-    use super::{load_audio_notes_from_conn, prefer_audio_attachment};
+    use super::{
+        collapse_duplicate_audio_attachments, load_audio_notes_from_conn, prefer_audio_attachment,
+    };
 
     #[test]
     fn load_audio_notes_deduplicates_duplicate_rows_and_prefers_transcript() {
@@ -323,5 +348,37 @@ mod tests {
         assert_eq!(chosen.title.as_deref(), Some("錄音"));
         assert_eq!(chosen.duration_seconds, Some(3.0));
         assert_eq!(chosen.path, PathBuf::from("/tmp/one.wav"));
+    }
+
+    #[test]
+    fn collapse_duplicate_audio_attachments_keeps_distinct_same_filename_when_duration_differs() {
+        let attachments = vec![
+            super::audio_attachment_from_row(
+                Some("錄音 A".into()),
+                None,
+                None,
+                None,
+                None,
+                "same.wav".into(),
+                "/tmp/one.wav".into(),
+                Some(3.0),
+            )
+            .expect("attachment a"),
+            super::audio_attachment_from_row(
+                Some("錄音 B".into()),
+                None,
+                None,
+                None,
+                None,
+                "same.wav".into(),
+                "/tmp/two.wav".into(),
+                Some(4.0),
+            )
+            .expect("attachment b"),
+        ];
+
+        let deduped = collapse_duplicate_audio_attachments(attachments);
+
+        assert_eq!(deduped.len(), 2);
     }
 }
