@@ -4,7 +4,7 @@ use crate::notes::{FileBackedAttachment, FileBackedNote, MEDIA_MATCH_WINDOW_SECS
 
 use super::match_key;
 
-const FILE_BACKED_TITLE_MATCH_WINDOW_SECS: i64 = 120;
+const FILE_BACKED_TITLE_MATCH_WINDOW_SECS: i64 = 90;
 
 pub(super) fn labels_for_file_backed(attachments: &[FileBackedAttachment], placeholder_count: usize) -> Vec<String> {
     attachments
@@ -108,5 +108,36 @@ mod tests {
         let matched = match_file_backed_note(&cue, &notes);
 
         assert!(matched.is_some());
+    }
+
+    #[test]
+    fn match_file_backed_note_rejects_same_title_outside_fallback_window() {
+        let cue = Cue {
+            source: CueSource::Notes,
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 9, 23, 44, 17).unwrap(),
+            content: "[Attachment]".into(),
+            url: None,
+            title: Some("新增備忘錄".into()),
+            tags: Vec::new(),
+            attachment_segments: Vec::new(),
+            metadata: HashMap::new(),
+        };
+        let notes = vec![FileBackedNote {
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 9, 23, 42, 37)
+                .unwrap()
+                .timestamp(),
+            title: Some("新增備忘錄".into()),
+            attachments: vec![FileBackedAttachment {
+                kind: AttachmentKind::Binary,
+                title: None,
+                filename: "blob.bin".into(),
+                path: PathBuf::from("/tmp/blob.bin"),
+                sha256: None,
+            }],
+        }];
+
+        let matched = match_file_backed_note(&cue, &notes);
+
+        assert!(matched.is_none());
     }
 }

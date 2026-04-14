@@ -16,6 +16,15 @@ pub(crate) fn load_file_backed_notes(since: DateTime<Utc>) -> Result<Vec<FileBac
     let conn = open_notes_db()?;
     let media_root = notes_group_container_path()?.join("Accounts");
 
+    load_file_backed_notes_from_conn(&conn, &media_root, since)
+}
+
+fn load_file_backed_notes_from_conn(
+    conn: &rusqlite::Connection,
+    media_root: &std::path::Path,
+    since: DateTime<Utc>,
+) -> Result<Vec<FileBackedNote>, MacosError> {
+
     let mut stmt = conn
         .prepare(
             r#"
@@ -36,7 +45,7 @@ pub(crate) fn load_file_backed_notes(since: DateTime<Utc>) -> Result<Vec<FileBac
             ON attachment.ZNOTE = note.Z_PK
         JOIN ZICCLOUDSYNCINGOBJECT AS media
             ON attachment.ZMEDIA = media.Z_PK
-        WHERE attachment.ZTYPEUTI IN ('com.adobe.pdf', 'public.data')
+        WHERE attachment.ZTYPEUTI IN ('com.adobe.pdf', 'public.pdf', 'public.data')
           AND media.ZFILENAME IS NOT NULL
           AND media.ZIDENTIFIER IS NOT NULL
           AND COALESCE(
@@ -133,11 +142,16 @@ fn file_backed_attachment_from_row(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
+    use chrono::{TimeZone, Utc};
     use cueward_core::AttachmentKind;
+    use rusqlite::Connection;
 
-    use super::{attachment_kind_from_uti, file_backed_attachment_from_row};
+    use super::{
+        attachment_kind_from_uti, file_backed_attachment_from_row, load_file_backed_notes_from_conn,
+    };
 
     #[test]
     fn file_backed_attachment_from_row_builds_pdf_attachment() {
@@ -182,5 +196,55 @@ mod tests {
         assert_eq!(attachment_kind_from_uti("public.pdf"), Some(AttachmentKind::Pdf));
         assert_eq!(attachment_kind_from_uti("public.data"), Some(AttachmentKind::Binary));
         assert_eq!(attachment_kind_from_uti("public.url"), None);
+    }
+
+    #[test]
+    fn load_file_backed_notes_includes_public_pdf_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("NoteStore.sqlite");
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ZICCLOUDSYNCINGOBJECT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMODIFICATIONDATE REAL,
+                ZMODIFICATIONDATE1 REAL,
+                ZTITLE TEXT,
+                ZTITLE1 TEXT,
+                ZMEDIA INTEGER,
+                ZFILENAME TEXT,
+                ZIDENTIFIER TEXT,
+                ZNOTE INTEGER,
+                ZTYPEUTI TEXT
+            );
+
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZTITLE1, ZMODIFICATIONDATE1)
+            VALUES (1, 'pdf note', 1000.0);
+
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZNOTE, ZMEDIA, ZTYPEUTI, ZTITLE, ZMODIFICATIONDATE)
+            VALUES (2, 1, 3, 'public.pdf', 'document.pdf', 999.0);
+
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZFILENAME, ZIDENTIFIER)
+            VALUES (3, 'document.pdf', 'attachment-id');
+            "#,
+        )
+        .expect("seed sqlite");
+
+        let media_root = temp.path().join("Accounts");
+        let media_dir = media_root.join("test-account/Media/attachment-id/child");
+        fs::create_dir_all(&media_dir).expect("create media dir");
+        fs::write(media_dir.join("document.pdf"), b"pdf").expect("write pdf");
+
+        let since = Utc
+            .timestamp_opt(978_307_200 + 900, 0)
+            .single()
+            .expect("since");
+        let notes =
+            load_file_backed_notes_from_conn(&conn, &media_root, since).expect("load file-backed notes");
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title.as_deref(), Some("pdf note"));
+        assert_eq!(notes[0].attachments.len(), 1);
+        assert_eq!(notes[0].attachments[0].kind, AttachmentKind::Pdf);
     }
 }
