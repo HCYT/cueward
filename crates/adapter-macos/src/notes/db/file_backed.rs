@@ -35,7 +35,7 @@ fn load_file_backed_notes_from_conn(
                 attachment.ZMODIFICATIONDATE,
                 attachment.ZMODIFICATIONDATE1
             ),
-            note.ZTITLE1,
+            COALESCE(note.ZTITLE, note.ZTITLE1),
             attachment.ZTYPEUTI,
             attachment.ZTITLE,
             media.ZFILENAME,
@@ -45,7 +45,7 @@ fn load_file_backed_notes_from_conn(
             ON attachment.ZNOTE = note.Z_PK
         JOIN ZICCLOUDSYNCINGOBJECT AS media
             ON attachment.ZMEDIA = media.Z_PK
-        WHERE attachment.ZTYPEUTI IN ('com.adobe.pdf', 'public.pdf', 'public.data')
+        WHERE attachment.ZTYPEUTI IN ('com.adobe.pdf', 'public.pdf', 'public.data', 'com.adobe.scan')
           AND media.ZFILENAME IS NOT NULL
           AND media.ZIDENTIFIER IS NOT NULL
           AND COALESCE(
@@ -117,6 +117,7 @@ fn attachment_kind_from_uti(uti: &str) -> Option<AttachmentKind> {
     match uti {
         "com.adobe.pdf" | "public.pdf" => Some(AttachmentKind::Pdf),
         "public.data" => Some(AttachmentKind::Binary),
+        "com.adobe.scan" => Some(AttachmentKind::Scan),
         _ => None,
     }
 }
@@ -191,10 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn attachment_kind_from_uti_maps_pdf_and_binary() {
+    fn attachment_kind_from_uti_maps_pdf_binary_and_scan() {
         assert_eq!(attachment_kind_from_uti("com.adobe.pdf"), Some(AttachmentKind::Pdf));
         assert_eq!(attachment_kind_from_uti("public.pdf"), Some(AttachmentKind::Pdf));
         assert_eq!(attachment_kind_from_uti("public.data"), Some(AttachmentKind::Binary));
+        assert_eq!(attachment_kind_from_uti("com.adobe.scan"), Some(AttachmentKind::Scan));
         assert_eq!(attachment_kind_from_uti("public.url"), None);
     }
 
@@ -218,7 +220,7 @@ mod tests {
                 ZTYPEUTI TEXT
             );
 
-            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZTITLE1, ZMODIFICATIONDATE1)
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZTITLE, ZMODIFICATIONDATE1)
             VALUES (1, 'pdf note', 1000.0);
 
             INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZNOTE, ZMEDIA, ZTYPEUTI, ZTITLE, ZMODIFICATIONDATE)
@@ -246,5 +248,55 @@ mod tests {
         assert_eq!(notes[0].title.as_deref(), Some("pdf note"));
         assert_eq!(notes[0].attachments.len(), 1);
         assert_eq!(notes[0].attachments[0].kind, AttachmentKind::Pdf);
+    }
+
+    #[test]
+    fn load_file_backed_notes_includes_scan_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("NoteStore.sqlite");
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ZICCLOUDSYNCINGOBJECT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMODIFICATIONDATE REAL,
+                ZMODIFICATIONDATE1 REAL,
+                ZTITLE TEXT,
+                ZTITLE1 TEXT,
+                ZMEDIA INTEGER,
+                ZFILENAME TEXT,
+                ZIDENTIFIER TEXT,
+                ZNOTE INTEGER,
+                ZTYPEUTI TEXT
+            );
+
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZTITLE1, ZMODIFICATIONDATE1)
+            VALUES (1, 'scan note', 1000.0);
+
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZNOTE, ZMEDIA, ZTYPEUTI, ZTITLE, ZMODIFICATIONDATE)
+            VALUES (2, 1, 3, 'com.adobe.scan', 'scan.heic', 999.0);
+
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, ZFILENAME, ZIDENTIFIER)
+            VALUES (3, 'scan.heic', 'scan-id');
+            "#,
+        )
+        .expect("seed sqlite");
+
+        let media_root = temp.path().join("Accounts");
+        let media_dir = media_root.join("test-account/Media/scan-id/child");
+        fs::create_dir_all(&media_dir).expect("create media dir");
+        fs::write(media_dir.join("scan.heic"), b"scan").expect("write scan");
+
+        let since = Utc
+            .timestamp_opt(978_307_200 + 900, 0)
+            .single()
+            .expect("since");
+        let notes =
+            load_file_backed_notes_from_conn(&conn, &media_root, since).expect("load file-backed notes");
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title.as_deref(), Some("scan note"));
+        assert_eq!(notes[0].attachments.len(), 1);
+        assert_eq!(notes[0].attachments[0].kind, AttachmentKind::Scan);
     }
 }
