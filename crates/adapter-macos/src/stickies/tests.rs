@@ -299,6 +299,37 @@ fn update_sticky_with_color_rewrites_all_color_fields() {
 }
 
 #[test]
+fn update_sticky_title_only_preserves_existing_frame_and_expanded_size() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sticky = create_sticky_in_root(temp.path(), "顏色測試", "內容").expect("create");
+
+    update_sticky_in_root_with_options(
+        temp.path(),
+        &sticky.id,
+        Some("只改標題"),
+        None,
+        &StickyMutationOptions::default(),
+        &[],
+    )
+    .expect("update");
+
+    let entries = parse_saved_state(&saved_state_path(temp.path())).expect("state");
+    let updated = entries
+        .iter()
+        .find(|entry| entry.id == sticky.id)
+        .expect("updated entry");
+
+    assert_eq!(
+        updated.raw.get("Frame").and_then(Value::as_string),
+        Some("{{200, 900}, {300, 200}}")
+    );
+    assert_eq!(
+        updated.raw.get("ExpandedSize").and_then(Value::as_string),
+        Some("{300, 200}")
+    );
+}
+
+#[test]
 fn sticky_color_preset_rejects_unsupported_values() {
     let err = StickyColorPreset::from_str("orange").expect_err("unsupported color should fail");
 

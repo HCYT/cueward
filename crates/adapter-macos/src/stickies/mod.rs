@@ -44,6 +44,14 @@ pub struct StickyMutationOptions {
 }
 
 impl StickyMutationOptions {
+    fn has_geometry_options(&self) -> bool {
+        self.display.is_some()
+            || self.x.is_some()
+            || self.y.is_some()
+            || self.width.is_some()
+            || self.height.is_some()
+    }
+
     fn explicit_size(&self) -> Option<StickySize> {
         match (self.width, self.height) {
             (Some(width), Some(height)) => Some(StickySize { width, height }),
@@ -352,26 +360,28 @@ fn update_sticky_in_root_with_options(
             .raw
             .insert(TITLE_KEY.into(), Value::String(title.to_string()));
     }
-    let current_frame = frame_from_entry(&entries[index]).unwrap_or(StickyFrame {
-        x: 200,
-        y: 900,
-        width: 300,
-        height: 200,
-    });
-    let next_frame = resolve_updated_frame(current_frame, options, displays)?;
-    let next_size = StickySize {
-        width: next_frame.width,
-        height: next_frame.height,
-    };
     if let Some(color) = options.color {
         apply_color_scheme(&mut entries[index].raw, color.scheme());
     }
-    entries[index]
-        .raw
-        .insert("Frame".into(), Value::String(next_frame.to_state_value()));
-    entries[index]
-        .raw
-        .insert("ExpandedSize".into(), Value::String(next_size.to_state_value()));
+    if options.has_geometry_options() {
+        let current_frame = frame_from_entry(&entries[index]).unwrap_or(StickyFrame {
+            x: 200,
+            y: 900,
+            width: 300,
+            height: 200,
+        });
+        let next_frame = resolve_updated_frame(current_frame, options, displays)?;
+        let next_size = StickySize {
+            width: next_frame.width,
+            height: next_frame.height,
+        };
+        entries[index]
+            .raw
+            .insert("Frame".into(), Value::String(next_frame.to_state_value()));
+        entries[index]
+            .raw
+            .insert("ExpandedSize".into(), Value::String(next_size.to_state_value()));
+    }
 
     if body.is_some() {
         write_sticky_body(&body_path, &next_body)?;
