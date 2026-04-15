@@ -1,6 +1,8 @@
 use clap::Subcommand;
 use std::process;
 
+use super::helpers::print_external;
+
 #[derive(Subcommand)]
 pub(crate) enum StickiesAction {
     /// List stickies
@@ -38,7 +40,7 @@ pub(crate) fn dispatch(action: StickiesAction) {
     match action {
         StickiesAction::List => match cueward_adapter_macos::stickies::list_stickies() {
             Ok(notes) => {
-                println!("{}", serde_json::to_string_pretty(&notes).unwrap());
+                print_external("stickies/list", &serde_json::to_string_pretty(&notes).unwrap());
                 eprintln!("{} sticky note(s)", notes.len());
             }
             Err(e) => {
@@ -57,7 +59,7 @@ pub(crate) fn dispatch(action: StickiesAction) {
                             "body": sticky.body
                         }
                     });
-                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                    print_external("stickies/create", &serde_json::to_string_pretty(&response).unwrap());
                 }
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -76,7 +78,7 @@ pub(crate) fn dispatch(action: StickiesAction) {
                             "body": sticky.body
                         }
                     });
-                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                    print_external("stickies/update", &serde_json::to_string_pretty(&response).unwrap());
                 }
                 Err(e) => {
                     eprintln!("error: {e}");

@@ -114,7 +114,7 @@ fn read_sticky_body(path: &Path) -> Result<String, MacosError> {
         return Err(MacosError::Other(format!("textutil failed: {stderr}")));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn write_sticky_body(path: &Path, body: &str) -> Result<(), MacosError> {
@@ -358,6 +358,17 @@ mod tests {
         let body = read_sticky_body(&path).expect("read rtf");
 
         assert_eq!(body, "第一行\n第二行");
+    }
+
+    #[test]
+    fn read_sticky_body_preserves_trailing_blank_lines() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("TXT.rtf");
+        write_sticky_body(&path, "第一行\n第二行\n\n").expect("write rtf");
+
+        let body = read_sticky_body(&path).expect("read rtf");
+
+        assert_eq!(body, "第一行\n第二行\n\n");
     }
 
     #[test]
