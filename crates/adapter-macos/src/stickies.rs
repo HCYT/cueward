@@ -194,6 +194,60 @@ fn default_state_entry(id: &str, title: &str) -> StickyStateEntry {
     StickyStateEntry { id: id.into(), raw }
 }
 
+fn clone_state_entry(
+    template: Option<&StickyStateEntry>,
+    id: &str,
+    title: &str,
+    z_order: i64,
+) -> StickyStateEntry {
+    match template {
+        Some(template) => {
+            let mut raw = template.raw.clone();
+            raw.insert("UUID".into(), Value::String(id.into()));
+            raw.insert(TITLE_KEY.into(), Value::String(title.into()));
+            raw.insert("ZOrder".into(), Value::Integer(z_order.into()));
+            if let Some(frame) = raw.get("Frame").and_then(Value::as_string) {
+                raw.insert("Frame".into(), Value::String(offset_frame(frame)));
+            }
+            StickyStateEntry { id: id.into(), raw }
+        }
+        None => default_state_entry(id, title),
+    }
+}
+
+fn max_z_order(entries: &[StickyStateEntry]) -> i64 {
+    entries
+        .iter()
+        .filter_map(|entry| entry.raw.get("ZOrder"))
+        .filter_map(|value| value.as_signed_integer())
+        .max()
+        .unwrap_or(0)
+}
+
+fn offset_frame(frame: &str) -> String {
+    let Some((position, size)) = frame
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .and_then(|value| value.split_once("}, {"))
+    else {
+        return frame.to_string();
+    };
+    let Some((x, y)) = position.split_once(", ") else {
+        return frame.to_string();
+    };
+    let Some((width, height)) = size.split_once(", ") else {
+        return frame.to_string();
+    };
+    let Ok(x) = x.parse::<i32>() else {
+        return frame.to_string();
+    };
+    let Ok(y) = y.parse::<i32>() else {
+        return frame.to_string();
+    };
+
+    format!("{{{{{}, {}}}, {{{}, {}}}}}", x + 24, y - 24, width, height)
+}
+
 fn load_state_entries_for_mutation(root: &Path) -> Result<Vec<StickyStateEntry>, MacosError> {
     let state_path = saved_state_path(root);
     if !state_path.exists() {
@@ -215,7 +269,9 @@ fn find_entry_mut<'a>(
 fn create_sticky_in_root(root: &Path, title: &str, body: &str) -> Result<StickiesNote, MacosError> {
     let id = uuid::Uuid::new_v4().to_string().to_uppercase();
     let mut entries = load_state_entries_for_mutation(root)?;
-    entries.push(default_state_entry(&id, title));
+    let next_z_order = max_z_order(&entries) + 1;
+    let template = entries.first().cloned();
+    entries.push(clone_state_entry(template.as_ref(), &id, title, next_z_order));
     write_sticky_body(&sticky_rtf_path(root, &id), body)?;
     write_saved_state(&saved_state_path(root), &entries)?;
 
@@ -384,6 +440,48 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].title, "臨時待辦");
         assert_eq!(notes[0].body, "記得回覆客戶");
+    }
+
+    #[test]
+    fn create_sticky_clones_existing_state_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let template = StickyStateEntry {
+            id: "EXISTING".into(),
+            raw: {
+                let mut raw = Dictionary::new();
+                raw.insert("UUID".into(), Value::String("EXISTING".into()));
+                raw.insert(TITLE_KEY.into(), Value::String("舊標題".into()));
+                raw.insert("Frame".into(), Value::String("{{200, 900}, {300, 200}}".into()));
+                raw.insert("ZOrder".into(), Value::Integer(5.into()));
+                raw.insert("StickyColor".into(), Value::String("blue".into()));
+                raw
+            },
+        };
+        write_saved_state(&saved_state_path(temp.path()), &[template]).expect("seed state");
+
+        let sticky = create_sticky_in_root(temp.path(), "新標題", "新內容").expect("create");
+        let entries = parse_saved_state(&saved_state_path(temp.path())).expect("state");
+        let created = entries
+            .iter()
+            .find(|entry| entry.id == sticky.id)
+            .expect("created entry");
+
+        assert_eq!(
+            created.raw.get(TITLE_KEY).and_then(Value::as_string),
+            Some("新標題")
+        );
+        assert_eq!(
+            created.raw.get("StickyColor").and_then(Value::as_string),
+            Some("blue")
+        );
+        assert_eq!(
+            created.raw.get("Frame").and_then(Value::as_string),
+            Some("{{224, 876}, {300, 200}}")
+        );
+        assert_eq!(
+            created.raw.get("ZOrder").and_then(Value::as_signed_integer),
+            Some(6)
+        );
     }
 
     #[test]
