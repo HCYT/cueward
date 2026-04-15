@@ -53,3 +53,29 @@ fn cli_parses_screenshot_window_id_with_ocr_and_output() {
         _ => panic!("unexpected command"),
     }
 }
+
+#[test]
+fn cli_parses_screenshot_window_with_parent_flags() {
+    let cli = Cli::try_parse_from([
+        "cueward",
+        "screenshot",
+        "--ocr",
+        "window",
+        "--id",
+        "12345",
+    ])
+    .expect("parse screenshot window with parent flags");
+
+    match cli.command {
+        Command::Screenshot {
+            ocr,
+            action: Some(ScreenshotAction::Window { id, ocr: inner_ocr, .. }),
+            ..
+        } => {
+            assert!(ocr);
+            assert_eq!(id, 12345);
+            assert!(!inner_ocr);
+        }
+        _ => panic!("unexpected command"),
+    }
+}

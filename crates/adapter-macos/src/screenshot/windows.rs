@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::process::Command;
 
 use crate::MacosError;
@@ -79,6 +80,7 @@ fn is_noise_window(entry: &WindowCatalogEntry) -> bool {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn find_capturable_window(
     windows: &[CapturableWindow],
     window_id: u32,
@@ -89,6 +91,7 @@ pub(crate) fn find_capturable_window(
         .ok_or_else(|| MacosError::Other(format!("window id not found: {window_id}")))
 }
 
+/// List on-screen windows that can be captured, sorted with frontmost first.
 pub fn list_capturable_windows() -> Result<Vec<CapturableWindow>, MacosError> {
     let script = r#"import AppKit
 import CoreGraphics
@@ -135,9 +138,13 @@ if let text = String(data: data, encoding: .utf8) {
     print(text)
 }"#;
 
+    let mut file = tempfile::NamedTempFile::new()
+        .map_err(|error| MacosError::Other(format!("failed to create swift temp file: {error}")))?;
+    file.write_all(script.as_bytes())
+        .map_err(|error| MacosError::Other(format!("failed to write swift temp file: {error}")))?;
+
     let output = Command::new("swift")
-        .arg("-e")
-        .arg(script)
+        .arg(file.path())
         .output()
         .map_err(|error| MacosError::Other(format!("swift: {error}")))?;
 
@@ -148,9 +155,5 @@ if let text = String(data: data, encoding: .utf8) {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed = parse_window_list_payload(&stdout)?;
-    let selected = select_capturable_windows(parsed);
-    if selected.is_empty() {
-        return Err(MacosError::Other("no capturable windows found".into()));
-    }
-    Ok(selected)
+    Ok(select_capturable_windows(parsed))
 }

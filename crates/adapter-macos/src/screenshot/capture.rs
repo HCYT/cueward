@@ -6,7 +6,6 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::MacosError;
-use super::windows::{find_capturable_window, list_capturable_windows};
 
 const CACHE_DIR: &str = ".cueward/cache/screenshots";
 
@@ -18,6 +17,7 @@ pub struct ScreenshotResult {
     pub ocr_text: Option<String>,
 }
 
+/// Validate that a user-supplied output path contains no control characters or parent directory components.
 pub fn validate_user_output_path(path: &str) -> Result<&Path, String> {
     let candidate = Path::new(path);
     if path.contains('\n') || path.contains('\r') {
@@ -32,6 +32,7 @@ pub fn validate_user_output_path(path: &str) -> Result<&Path, String> {
     Ok(candidate)
 }
 
+/// Validate that a display number, if given, is within the allowed range (1..=10).
 pub fn validate_display(display: Option<u32>) -> Result<(), String> {
     if let Some(display) = display {
         if !(1..=10).contains(&display) {
@@ -43,6 +44,7 @@ pub fn validate_display(display: Option<u32>) -> Result<(), String> {
     Ok(())
 }
 
+/// Check that a screenshot file was created at the expected path.
 pub fn ensure_screenshot_file_exists(path: &Path) -> Result<(), String> {
     if path.exists() {
         Ok(())
@@ -86,12 +88,19 @@ fn capture_to_path(
     cmd.arg("-x");
     configure(&mut cmd);
     cmd.arg(&path);
-    let status = cmd
-        .status()
+    let output_result = cmd
+        .output()
         .map_err(|e| MacosError::Other(format!("screencapture: {e}")))?;
 
-    if !status.success() {
-        return Err(MacosError::Other("screencapture failed".into()));
+    if !output_result.status.success() {
+        let stderr = String::from_utf8_lossy(&output_result.stderr);
+        if stderr.trim().is_empty() {
+            return Err(MacosError::Other("screencapture failed".into()));
+        }
+        return Err(MacosError::Other(format!(
+            "screencapture failed: {}",
+            stderr.trim()
+        )));
     }
 
     ensure_screenshot_file_exists(Path::new(&path)).map_err(MacosError::Other)?;
@@ -140,8 +149,6 @@ pub fn capture_window(
     output: Option<&str>,
     window_id: u32,
 ) -> Result<ScreenshotResult, MacosError> {
-    let windows = list_capturable_windows()?;
-    let _ = find_capturable_window(&windows, window_id)?;
     capture_to_path(ocr, output, &format!("-w{window_id}"), |cmd| {
         cmd.args(["-l", &window_id.to_string()]);
     })

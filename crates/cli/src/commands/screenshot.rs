@@ -53,12 +53,22 @@ pub(crate) fn dispatch(
                 process::exit(1);
             }
         },
-        Some(ScreenshotAction::Window { id, ocr, output }) => {
-            if let Err(err) = validate_optional_output_path("--output", output.as_deref()) {
+        Some(ScreenshotAction::Window {
+            id,
+            ocr: window_ocr,
+            output: window_output,
+        }) => {
+            let effective_ocr = ocr || window_ocr;
+            let effective_output = window_output.or(output);
+            if let Err(err) = validate_optional_output_path("--output", effective_output.as_deref()) {
                 eprintln!("{err}");
                 process::exit(1);
             }
-            match cueward_adapter_macos::screenshot::capture_window(ocr, output.as_deref(), id) {
+            match cueward_adapter_macos::screenshot::capture_window(
+                effective_ocr,
+                effective_output.as_deref(),
+                id,
+            ) {
                 Ok(result) => {
                     print_external("screenshot/window", &serde_json::to_string_pretty(&result).unwrap());
                     eprintln!("screenshot saved to {}", result.path);
