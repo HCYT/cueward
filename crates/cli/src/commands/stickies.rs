@@ -93,7 +93,7 @@ pub(crate) fn dispatch(action: StickiesAction) {
                         "deleted": true,
                         "id": id
                     });
-                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                    print_external("stickies/delete", &serde_json::to_string_pretty(&response).unwrap());
                 }
                 Err(e) => {
                     eprintln!("error: {e}");
