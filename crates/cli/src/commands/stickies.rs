@@ -1,5 +1,6 @@
 use clap::Subcommand;
 use std::process;
+use std::str::FromStr;
 
 use super::helpers::print_external;
 
@@ -88,13 +89,24 @@ pub(crate) fn dispatch(action: StickiesAction) {
             title,
             body,
             display,
-            color: _,
+            color,
             x,
             y,
             width,
             height,
         } => {
+            let color = match color {
+                Some(value) => match cueward_adapter_macos::stickies::StickyColorPreset::from_str(&value) {
+                    Ok(color) => Some(color),
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        process::exit(1);
+                    }
+                },
+                None => None,
+            };
             let options = cueward_adapter_macos::stickies::StickyMutationOptions {
+                color,
                 display,
                 x,
                 y,
@@ -124,13 +136,24 @@ pub(crate) fn dispatch(action: StickiesAction) {
             title,
             body,
             display,
-            color: _,
+            color,
             x,
             y,
             width,
             height,
         } => {
+            let color = match color {
+                Some(value) => match cueward_adapter_macos::stickies::StickyColorPreset::from_str(&value) {
+                    Ok(color) => Some(color),
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        process::exit(1);
+                    }
+                },
+                None => None,
+            };
             let options = cueward_adapter_macos::stickies::StickyMutationOptions {
+                color,
                 display,
                 x,
                 y,

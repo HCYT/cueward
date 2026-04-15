@@ -1,5 +1,6 @@
 use super::*;
 use plist::Dictionary;
+use std::str::FromStr;
 
 fn sample_saved_state() -> Value {
     Value::Array(vec![Value::Dictionary({
@@ -230,6 +231,78 @@ fn create_on_display_without_explicit_coordinates_cascades_within_visible_frame(
         second_entry.raw.get("Frame").and_then(Value::as_string),
         Some("{{-2846, 2345}, {300, 200}}")
     );
+}
+
+#[test]
+fn create_sticky_with_color_writes_all_color_fields() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sticky = create_sticky_in_root_with_options(
+        temp.path(),
+        "顏色測試",
+        "內容",
+        &StickyMutationOptions {
+            color: Some(StickyColorPreset::Green),
+            ..Default::default()
+        },
+        &[],
+    )
+    .expect("create sticky");
+
+    let entries = parse_saved_state(&saved_state_path(temp.path())).expect("state");
+    let created = entries
+        .iter()
+        .find(|entry| entry.id == sticky.id)
+        .expect("created entry");
+
+    assert_eq!(
+        created.raw.get("StickyColor").and_then(Value::as_dictionary),
+        Some(&color_dictionary(0.6980392156862745, 1.0, 0.6313725490196078, 1.0))
+    );
+    assert_eq!(
+        created.raw.get("ControlColor").and_then(Value::as_dictionary),
+        Some(&color_dictionary(0.3176470588235294, 0.7333333333333333, 0.3176470588235294, 1.0))
+    );
+}
+
+#[test]
+fn update_sticky_with_color_rewrites_all_color_fields() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sticky = create_sticky_in_root(temp.path(), "顏色測試", "內容").expect("create");
+
+    update_sticky_in_root_with_options(
+        temp.path(),
+        &sticky.id,
+        Some("粉紅"),
+        None,
+        &StickyMutationOptions {
+            color: Some(StickyColorPreset::Pink),
+            ..Default::default()
+        },
+        &[],
+    )
+    .expect("update");
+
+    let entries = parse_saved_state(&saved_state_path(temp.path())).expect("state");
+    let updated = entries
+        .iter()
+        .find(|entry| entry.id == sticky.id)
+        .expect("updated entry");
+
+    assert_eq!(
+        updated.raw.get("HighlightColor").and_then(Value::as_dictionary),
+        Some(&color_dictionary(0.8862745098039215, 0.4588235294117647, 0.4588235294117647, 1.0))
+    );
+    assert_eq!(
+        updated.raw.get("SpineColor").and_then(Value::as_dictionary),
+        Some(&color_dictionary(1.0, 0.6980392156862745, 0.6980392156862745, 1.0))
+    );
+}
+
+#[test]
+fn sticky_color_preset_rejects_unsupported_values() {
+    let err = StickyColorPreset::from_str("orange").expect_err("unsupported color should fail");
+
+    assert_eq!(err.to_string(), "unsupported sticky color: orange");
 }
 
 #[test]

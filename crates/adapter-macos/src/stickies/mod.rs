@@ -11,7 +11,8 @@ mod geometry;
 mod state;
 
 #[cfg(test)]
-use self::color::{color_dictionary, StickyColorPreset};
+use self::color::color_dictionary;
+pub use self::color::StickyColorPreset;
 use self::display::{
     cascade_frame_for_display, find_display_bounds, load_display_bounds, resolve_frame_for_display,
     StickyDisplayBounds,
@@ -34,6 +35,7 @@ pub struct StickiesNote {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StickyMutationOptions {
+    pub color: Option<StickyColorPreset>,
     pub display: Option<u32>,
     pub x: Option<i32>,
     pub y: Option<i32>,
@@ -64,6 +66,7 @@ fn ensure_update_request(
 ) -> Result<(), MacosError> {
     if title.is_none()
         && body.is_none()
+        && options.color.is_none()
         && options.display.is_none()
         && options.x.is_none()
         && options.y.is_none()
@@ -135,6 +138,9 @@ fn clone_state_entry(
                 width: frame.width,
                 height: frame.height,
             };
+            if let Some(color) = options.color {
+                apply_color_scheme(&mut raw, color.scheme());
+            }
             raw.insert("Frame".into(), Value::String(frame.to_state_value()));
             raw.insert("ExpandedSize".into(), Value::String(size.to_state_value()));
             Ok(StickyStateEntry { id: id.into(), raw })
@@ -146,6 +152,9 @@ fn clone_state_entry(
                 width: frame.width,
                 height: frame.height,
             };
+            if let Some(color) = options.color {
+                apply_color_scheme(&mut entry.raw, color.scheme());
+            }
             entry.raw.insert("Frame".into(), Value::String(frame.to_state_value()));
             entry.raw
                 .insert("ExpandedSize".into(), Value::String(size.to_state_value()));
@@ -255,6 +264,13 @@ fn resolve_updated_frame(
     Ok(current.with_size(size))
 }
 
+fn apply_color_scheme(raw: &mut plist::Dictionary, scheme: self::color::StickyColorScheme) {
+    raw.insert("ControlColor".into(), Value::Dictionary(scheme.control));
+    raw.insert("HighlightColor".into(), Value::Dictionary(scheme.highlight));
+    raw.insert("SpineColor".into(), Value::Dictionary(scheme.spine));
+    raw.insert("StickyColor".into(), Value::Dictionary(scheme.sticky));
+}
+
 fn create_sticky_in_root(root: &Path, title: &str, body: &str) -> Result<StickiesNote, MacosError> {
     create_sticky_in_root_with_options(root, title, body, &StickyMutationOptions::default(), &[])
 }
@@ -346,6 +362,9 @@ fn update_sticky_in_root_with_options(
         width: next_frame.width,
         height: next_frame.height,
     };
+    if let Some(color) = options.color {
+        apply_color_scheme(&mut entries[index].raw, color.scheme());
+    }
     entries[index]
         .raw
         .insert("Frame".into(), Value::String(next_frame.to_state_value()));
