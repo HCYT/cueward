@@ -65,9 +65,24 @@ fn resolve_recording_path(recordings_root: &Path, relative_path: Option<&str>) -
         return None;
     }
 
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
     let path = recordings_root.join(relative_path);
-    if path.exists() {
-        Some(path)
+    if !path.exists() {
+        return None;
+    }
+
+    let canonical_path = path.canonicalize().ok()?;
+    let canonical_root = recordings_root.canonicalize().ok()?;
+    if canonical_path.starts_with(&canonical_root) {
+        Some(canonical_path)
     } else {
         None
     }
@@ -120,9 +135,10 @@ fn load_voice_memos_from_conn(
 
     let mut items = Vec::new();
     for row in rows {
-        items.push(
-            row.map_err(|err| MacosError::Other(format!("failed to read voice memo row: {err}")))?,
-        );
+        match row {
+            Ok(item) => items.push(item),
+            Err(err) => eprintln!("warning: failed to read voice memo row: {err}"),
+        }
     }
     Ok(items)
 }
@@ -268,5 +284,48 @@ mod tests {
             .expect("item");
 
         assert_eq!(item.path, None);
+    }
+
+    #[test]
+    fn voice_memo_rejects_traversal_like_paths() {
+        let recordings_dir = PathBuf::from("/tmp/recordings");
+
+        let resolved = resolve_recording_path(&recordings_dir, Some("../../etc/passwd"));
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn voice_memo_list_skips_bad_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("CloudRecordings.db");
+        let recordings_dir = temp.path().join("Recordings");
+        std::fs::create_dir_all(&recordings_dir).expect("create recordings dir");
+        std::fs::write(recordings_dir.join("20250419 123512-F45D4751.m4a"), b"m4a")
+            .expect("write m4a");
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ZCLOUDRECORDING (
+                Z_PK INTEGER PRIMARY KEY,
+                ZDATE REAL,
+                ZDURATION REAL,
+                ZCUSTOMLABEL TEXT,
+                ZPATH TEXT,
+                ZUNIQUEID TEXT
+            );
+
+            INSERT INTO ZCLOUDRECORDING (Z_PK, ZDATE, ZDURATION, ZCUSTOMLABEL, ZPATH, ZUNIQUEID)
+            VALUES
+                (1, NULL, 1.5, '壞資料', '20250419 123512-F45D4751.m4a', 'BAD'),
+                (2, 766730112.887197, 1.5, '會議紀錄', '20250419 123512-F45D4751.m4a', 'GOOD');
+            "#,
+        )
+        .expect("seed db");
+
+        let items = load_voice_memos_from_conn(&conn, &recordings_dir).expect("load");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "GOOD");
     }
 }
