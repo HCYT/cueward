@@ -15,6 +15,24 @@ pub(crate) enum StickiesAction {
         /// Sticky body
         #[arg(long)]
         body: String,
+        /// Target display number
+        #[arg(long)]
+        display: Option<u32>,
+        /// Sticky color preset
+        #[arg(long)]
+        color: Option<String>,
+        /// X coordinate
+        #[arg(long, requires = "y")]
+        x: Option<i32>,
+        /// Y coordinate
+        #[arg(long, requires = "x")]
+        y: Option<i32>,
+        /// Sticky width
+        #[arg(long, requires = "height")]
+        width: Option<i32>,
+        /// Sticky height
+        #[arg(long, requires = "width")]
+        height: Option<i32>,
     },
     /// Update a sticky
     Update {
@@ -27,6 +45,24 @@ pub(crate) enum StickiesAction {
         /// New body
         #[arg(long)]
         body: Option<String>,
+        /// Target display number
+        #[arg(long)]
+        display: Option<u32>,
+        /// Sticky color preset
+        #[arg(long)]
+        color: Option<String>,
+        /// X coordinate
+        #[arg(long, requires = "y")]
+        x: Option<i32>,
+        /// Y coordinate
+        #[arg(long, requires = "x")]
+        y: Option<i32>,
+        /// Sticky width
+        #[arg(long, requires = "height")]
+        width: Option<i32>,
+        /// Sticky height
+        #[arg(long, requires = "width")]
+        height: Option<i32>,
     },
     /// Delete a sticky
     Delete {
@@ -48,7 +84,7 @@ pub(crate) fn dispatch(action: StickiesAction) {
                 process::exit(1);
             }
         },
-        StickiesAction::Create { title, body } => {
+        StickiesAction::Create { title, body, .. } => {
             match cueward_adapter_macos::stickies::create_sticky(&title, &body) {
                 Ok(sticky) => {
                     let response = serde_json::json!({
@@ -67,7 +103,7 @@ pub(crate) fn dispatch(action: StickiesAction) {
                 }
             }
         }
-        StickiesAction::Update { id, title, body } => {
+        StickiesAction::Update { id, title, body, .. } => {
             match cueward_adapter_macos::stickies::update_sticky(&id, title.as_deref(), body.as_deref()) {
                 Ok(sticky) => {
                     let response = serde_json::json!({
