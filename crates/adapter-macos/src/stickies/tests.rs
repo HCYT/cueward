@@ -73,6 +73,166 @@ fn blue_preset_emits_four_color_dictionaries() {
 }
 
 #[test]
+fn create_sticky_with_geometry_writes_frame_and_expanded_size() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sticky = create_sticky_in_root_with_options(
+        temp.path(),
+        "幾何測試",
+        "內容",
+        &StickyMutationOptions {
+            width: Some(420),
+            height: Some(260),
+            ..Default::default()
+        },
+        &[],
+    )
+    .expect("create sticky");
+
+    let entries = parse_saved_state(&saved_state_path(temp.path())).expect("state");
+    let created = entries
+        .iter()
+        .find(|entry| entry.id == sticky.id)
+        .expect("created entry");
+
+    assert_eq!(
+        created.raw.get("Frame").and_then(Value::as_string),
+        Some("{{224, 876}, {420, 260}}")
+    );
+    assert_eq!(
+        created.raw.get("ExpandedSize").and_then(Value::as_string),
+        Some("{420, 260}")
+    );
+}
+
+#[test]
+fn update_sticky_with_geometry_rewrites_frame_and_expanded_size() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sticky = create_sticky_in_root(temp.path(), "幾何測試", "內容").expect("create");
+
+    update_sticky_in_root_with_options(
+        temp.path(),
+        &sticky.id,
+        None,
+        None,
+        &StickyMutationOptions {
+            x: Some(10),
+            y: Some(20),
+            width: Some(360),
+            height: Some(220),
+            ..Default::default()
+        },
+        &[],
+    )
+    .expect("update");
+
+    let entries = parse_saved_state(&saved_state_path(temp.path())).expect("state");
+    let updated = entries
+        .iter()
+        .find(|entry| entry.id == sticky.id)
+        .expect("updated entry");
+
+    assert_eq!(
+        updated.raw.get("Frame").and_then(Value::as_string),
+        Some("{{10, 20}, {360, 220}}")
+    );
+    assert_eq!(
+        updated.raw.get("ExpandedSize").and_then(Value::as_string),
+        Some("{360, 220}")
+    );
+}
+
+#[test]
+fn display_relative_geometry_resolves_to_global_frame() {
+    let frame = resolve_frame_for_display(
+        StickyDisplayBounds {
+            frame: StickyFrame {
+                x: -2910,
+                y: 1169,
+                width: 2560,
+                height: 1440,
+            },
+            visible_frame: StickyFrame {
+                x: -2910,
+                y: 1262,
+                width: 2560,
+                height: 1347,
+            },
+        },
+        StickySize {
+            width: 420,
+            height: 260,
+        },
+        40,
+        80,
+    );
+
+    assert_eq!(
+        frame,
+        StickyFrame {
+            x: -2870,
+            y: 2269,
+            width: 420,
+            height: 260,
+        }
+    );
+}
+
+#[test]
+fn create_on_display_without_explicit_coordinates_cascades_within_visible_frame() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let displays = [StickyDisplayBounds {
+        frame: StickyFrame {
+            x: -2910,
+            y: 1169,
+            width: 2560,
+            height: 1440,
+        },
+        visible_frame: StickyFrame {
+            x: -2910,
+            y: 1262,
+            width: 2560,
+            height: 1347,
+        },
+    }];
+
+    let first = create_sticky_in_root_with_options(
+        temp.path(),
+        "第一張",
+        "內容",
+        &StickyMutationOptions {
+            display: Some(1),
+            ..Default::default()
+        },
+        &displays,
+    )
+    .expect("first");
+    let second = create_sticky_in_root_with_options(
+        temp.path(),
+        "第二張",
+        "內容",
+        &StickyMutationOptions {
+            display: Some(1),
+            ..Default::default()
+        },
+        &displays,
+    )
+    .expect("second");
+
+    let entries = parse_saved_state(&saved_state_path(temp.path())).expect("state");
+    let first_entry = entries.iter().find(|entry| entry.id == first.id).expect("first entry");
+    let second_entry = entries.iter().find(|entry| entry.id == second.id).expect("second entry");
+
+    assert_eq!(
+        first_entry.raw.get("Frame").and_then(Value::as_string),
+        Some("{{-2870, 2369}, {300, 200}}")
+    );
+    assert_eq!(
+        second_entry.raw.get("Frame").and_then(Value::as_string),
+        Some("{{-2846, 2345}, {300, 200}}")
+    );
+}
+
+#[test]
 fn sticky_title_falls_back_from_body_when_missing() {
     let title = derive_sticky_title(None, "第一行\n第二行", "sticky-1");
 

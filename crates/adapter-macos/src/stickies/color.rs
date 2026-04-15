@@ -1,5 +1,6 @@
 use plist::{Dictionary, Value};
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct StickyColorScheme {
     pub control: Dictionary,
@@ -8,12 +9,14 @@ pub struct StickyColorScheme {
     pub sticky: Dictionary,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StickyColorPreset {
     Blue,
 }
 
 impl StickyColorPreset {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn scheme(self) -> StickyColorScheme {
         match self {
             Self::Blue => StickyColorScheme {
@@ -26,6 +29,7 @@ impl StickyColorPreset {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn color_dictionary(red: f64, green: f64, blue: f64, alpha: f64) -> Dictionary {
     let mut raw = Dictionary::new();
     raw.insert("Red".into(), Value::Real(red));

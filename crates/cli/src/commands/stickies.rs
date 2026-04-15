@@ -84,8 +84,24 @@ pub(crate) fn dispatch(action: StickiesAction) {
                 process::exit(1);
             }
         },
-        StickiesAction::Create { title, body, .. } => {
-            match cueward_adapter_macos::stickies::create_sticky(&title, &body) {
+        StickiesAction::Create {
+            title,
+            body,
+            display,
+            color: _,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let options = cueward_adapter_macos::stickies::StickyMutationOptions {
+                display,
+                x,
+                y,
+                width,
+                height,
+            };
+            match cueward_adapter_macos::stickies::create_sticky_with_options(&title, &body, &options) {
                 Ok(sticky) => {
                     let response = serde_json::json!({
                         "created": true,
@@ -103,8 +119,30 @@ pub(crate) fn dispatch(action: StickiesAction) {
                 }
             }
         }
-        StickiesAction::Update { id, title, body, .. } => {
-            match cueward_adapter_macos::stickies::update_sticky(&id, title.as_deref(), body.as_deref()) {
+        StickiesAction::Update {
+            id,
+            title,
+            body,
+            display,
+            color: _,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let options = cueward_adapter_macos::stickies::StickyMutationOptions {
+                display,
+                x,
+                y,
+                width,
+                height,
+            };
+            match cueward_adapter_macos::stickies::update_sticky_with_options(
+                &id,
+                title.as_deref(),
+                body.as_deref(),
+                &options,
+            ) {
                 Ok(sticky) => {
                     let response = serde_json::json!({
                         "updated": true,

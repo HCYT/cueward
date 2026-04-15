@@ -23,6 +23,14 @@ impl StickyFrame {
             ..self
         }
     }
+
+    pub fn with_size(self, size: StickySize) -> Self {
+        Self {
+            width: size.width,
+            height: size.height,
+            ..self
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +40,7 @@ pub struct StickySize {
 }
 
 impl StickySize {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn to_state_value(self) -> String {
         format!("{{{}, {}}}", self.width, self.height)
     }
@@ -68,6 +77,7 @@ pub fn parse_frame(frame: &str) -> Result<StickyFrame, MacosError> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_expanded_size(size: &str) -> Result<StickySize, MacosError> {
     let Some(inner) = size.strip_prefix('{').and_then(|value| value.strip_suffix('}')) else {
         return Err(MacosError::Other(format!("invalid expanded size string: {size}")));
