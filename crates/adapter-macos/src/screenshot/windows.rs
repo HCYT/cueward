@@ -48,6 +48,7 @@ pub(crate) fn select_capturable_windows(entries: Vec<WindowCatalogEntry>) -> Vec
         .filter(|entry| entry.is_onscreen)
         .filter(|entry| entry.alpha > 0.0)
         .filter(|entry| entry.layer == 0)
+        .filter(|entry| !is_noise_window(entry))
         .map(|entry| CapturableWindow {
             window_id: entry.window_id,
             app: entry.app,
@@ -68,6 +69,14 @@ pub(crate) fn select_capturable_windows(entries: Vec<WindowCatalogEntry>) -> Vec
     });
 
     windows
+}
+
+fn is_noise_window(entry: &WindowCatalogEntry) -> bool {
+    matches!(
+        (entry.app.as_str(), entry.title.as_str()),
+        ("WindowManager", "App Icon Window")
+            | ("WindowManager", "Gesture Blocking Overlay")
+    )
 }
 
 pub(crate) fn find_capturable_window(

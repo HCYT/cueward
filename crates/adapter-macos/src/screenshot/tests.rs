@@ -101,6 +101,17 @@ fn select_capturable_windows_filters_out_noise_windows() {
         "is_onscreen": true,
         "is_frontmost": false,
         "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }
+      },
+      {
+        "window_id": 4,
+        "app": "WindowManager",
+        "title": "Gesture Blocking Overlay",
+        "owner_pid": 103,
+        "layer": 0,
+        "alpha": 1.0,
+        "is_onscreen": true,
+        "is_frontmost": false,
+        "bounds": { "x": 10, "y": 10, "width": 800, "height": 600 }
       }
     ]"#;
 
