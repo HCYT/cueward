@@ -1,4 +1,5 @@
 use super::*;
+use plist::Dictionary;
 
 fn sample_saved_state() -> Value {
     Value::Array(vec![Value::Dictionary({
@@ -17,6 +18,58 @@ fn parse_saved_state_reads_uuid_entries() {
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].id, "DF260009-9714-421B-BB65-D2B413C55F46");
+}
+
+#[test]
+fn parse_frame_round_trips_cocoa_frame_strings() {
+    let frame = parse_frame("{{200, 900}, {300, 200}}").expect("frame");
+
+    assert_eq!(
+        frame,
+        StickyFrame {
+            x: 200,
+            y: 900,
+            width: 300,
+            height: 200,
+        }
+    );
+    assert_eq!(frame.to_state_value(), "{{200, 900}, {300, 200}}");
+}
+
+#[test]
+fn parse_expanded_size_round_trips_state_strings() {
+    let size = parse_expanded_size("{420, 260}").expect("size");
+
+    assert_eq!(
+        size,
+        StickySize {
+            width: 420,
+            height: 260,
+        }
+    );
+    assert_eq!(size.to_state_value(), "{420, 260}");
+}
+
+#[test]
+fn blue_preset_emits_four_color_dictionaries() {
+    let scheme = StickyColorPreset::Blue.scheme();
+
+    assert_eq!(
+        scheme.sticky,
+        color_dictionary(0.6784313725490196, 0.9568627450980393, 1.0, 1.0)
+    );
+    assert_eq!(
+        scheme.control,
+        color_dictionary(0.1411764705882353, 0.8156862745098039, 0.9137254901960784, 1.0)
+    );
+    assert_eq!(
+        scheme.highlight,
+        color_dictionary(0.00784313725490196, 0.7372549019607844, 0.8431372549019608, 1.0)
+    );
+    assert_eq!(
+        scheme.spine,
+        color_dictionary(0.5372549019607843, 0.9411764705882353, 1.0, 1.0)
+    );
 }
 
 #[test]
