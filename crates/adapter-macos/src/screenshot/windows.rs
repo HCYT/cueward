@@ -138,7 +138,7 @@ if let text = String(data: data, encoding: .utf8) {
     print(text)
 }"#;
 
-    let mut file = tempfile::NamedTempFile::new()
+    let mut file = tempfile::NamedTempFile::with_suffix(".swift")
         .map_err(|error| MacosError::Other(format!("failed to create swift temp file: {error}")))?;
     file.write_all(script.as_bytes())
         .map_err(|error| MacosError::Other(format!("failed to write swift temp file: {error}")))?;
