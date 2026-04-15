@@ -4,9 +4,10 @@ use serde::Serialize;
 
 use crate::MacosError;
 use crate::scan_state::{
+    BACKOFF_SCAN_INTERVAL, NORMAL_MIN_SCAN_INTERVAL, STALE_RECHECK_INTERVAL, STALE_SKIP_AFTER,
     ScanEnvelope, ScanStatus, build_scan_key, entry_for, fingerprint_json, is_bot_like_author,
     is_too_old, is_too_short, load_state, make_envelope, record_success, save_state_warning,
-    skip_reason, stored_entry,
+    stored_entry,
 };
 use crate::safari_guard::with_safari_session;
 
@@ -56,25 +57,27 @@ fn fingerprint_threads_posts(posts: &[SocialFeedPost]) -> Result<String, MacosEr
     fingerprint_json(&payload)
 }
 
-fn threads_skip_envelope(
-    state: &mut State,
+fn threads_backoff_reason(
+    entry: &cueward_core::ScanTargetState,
     now: DateTime<Utc>,
-) -> Option<ScanEnvelope<Vec<SocialFeedPost>>> {
-    let target_url = THREADS_FEED_URL.to_string();
-    let key = build_scan_key("threads", &target_url);
-    let entry = entry_for(state, &key, "threads", &target_url);
-    if entry.deleted {
-        return Some(make_envelope(
-            entry,
-            ScanStatus::Deleted,
-            Some("deleted_target".to_string()),
-            None,
-            None,
-        ));
+) -> Option<String> {
+    let last_checked_at = entry.last_checked_at?;
+    if let Some(last_changed_at) = entry.last_changed_at {
+        if now - last_changed_at >= STALE_SKIP_AFTER
+            && now - last_checked_at < STALE_RECHECK_INTERVAL
+        {
+            return Some("stale_target_backoff".to_string());
+        }
     }
-    skip_reason(entry, now).map(|reason| {
-        make_envelope(entry, ScanStatus::Skipped, Some(reason), None, None)
-    })
+    let min_interval = if entry.no_change_count >= 2 {
+        BACKOFF_SCAN_INTERVAL
+    } else {
+        NORMAL_MIN_SCAN_INTERVAL
+    };
+    if now - last_checked_at < min_interval {
+        return Some("backoff_interval_not_elapsed".to_string());
+    }
+    None
 }
 
 fn update_threads_scan_state(
@@ -82,10 +85,6 @@ fn update_threads_scan_state(
     now: DateTime<Utc>,
     posts: Vec<SocialFeedPost>,
 ) -> Result<ScanEnvelope<Vec<SocialFeedPost>>, MacosError> {
-    if let Some(envelope) = threads_skip_envelope(state, now) {
-        return Ok(envelope);
-    }
-
     let target_url = THREADS_FEED_URL.to_string();
     let key = build_scan_key("threads", &target_url);
     let posts = filter_threads_posts(posts, now);
@@ -139,8 +138,19 @@ pub fn threads_extract_feed(
     })()"#;
         let now = Utc::now();
         let mut state = load_state();
-        if let Some(envelope) = threads_skip_envelope(&mut state, now) {
-            return Ok(envelope);
+        {
+            let target_url = THREADS_FEED_URL.to_string();
+            let key = build_scan_key("threads", &target_url);
+            let entry = entry_for(&mut state, &key, "threads", &target_url);
+            if let Some(reason) = threads_backoff_reason(entry, now) {
+                return Ok(make_envelope(
+                    entry,
+                    ScanStatus::Skipped,
+                    Some(reason),
+                    None,
+                    None,
+                ));
+            }
         }
         let _ = focus_tab("threads.com", profile_filter);
         let raw = execute_js_for_profile(js, profile_filter, "safari_threads_feed")?;
@@ -157,7 +167,10 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use cueward_core::State;
 
-    use super::{filter_threads_posts, update_threads_scan_state, SocialFeedPost, THREADS_FEED_URL};
+    use super::{
+        filter_threads_posts, threads_backoff_reason, update_threads_scan_state, SocialFeedPost,
+        THREADS_FEED_URL,
+    };
     use crate::scan_state::{ScanStatus, entry_for};
 
     fn post(author: &str, time: Option<&str>, content: &str) -> SocialFeedPost {
@@ -218,10 +231,30 @@ mod tests {
         let entry = entry_for(&mut state, &key, "threads", THREADS_FEED_URL);
         entry.last_checked_at = Some(now - Duration::minutes(5));
 
-        let envelope = update_threads_scan_state(&mut state, now, Vec::new()).expect("skipped envelope");
+        let envelope = update_threads_scan_state(
+            &mut state,
+            now,
+            vec![post(
+                "alice",
+                Some("2026-04-15T10:00:00Z"),
+                "這是一篇正常的 Threads 內容，長度足夠而且不是機器人",
+            )],
+        )
+        .expect("fresh envelope");
 
-        assert_eq!(envelope.status, ScanStatus::Skipped);
-        assert_eq!(envelope.reason.as_deref(), Some("backoff_interval_not_elapsed"));
-        assert!(envelope.data.is_none());
+        assert_eq!(envelope.status, ScanStatus::Fresh);
+        assert!(envelope.reason.is_none());
+        assert!(envelope.data.is_some());
+    }
+
+    #[test]
+    fn threads_backoff_reason_ignores_deleted_flag() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+        let mut state = State::default();
+        let key = format!("threads:{THREADS_FEED_URL}");
+        let entry = entry_for(&mut state, &key, "threads", THREADS_FEED_URL);
+        entry.deleted = true;
+
+        assert_eq!(threads_backoff_reason(entry, now), None);
     }
 }
