@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 
 use crate::MacosError;
 use crate::notes::{DrawingAttachment, DrawingNote};
@@ -11,7 +12,7 @@ pub(crate) fn load_drawing_notes(since: DateTime<Utc>) -> Result<Vec<DrawingNote
 }
 
 fn load_drawing_notes_from_conn(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     since: DateTime<Utc>,
 ) -> Result<Vec<DrawingNote>, MacosError> {
     let mut stmt = conn

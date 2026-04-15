@@ -40,7 +40,6 @@ pub(crate) fn enrich_cues_with_attachments(
     audio_notes: &[AudioNote],
     drawing_notes: &[DrawingNote],
 ) {
-    let _ = drawing_notes;
     for cue in cues.iter_mut() {
         if !matches!(cue.source, CueSource::Notes) {
             continue;
