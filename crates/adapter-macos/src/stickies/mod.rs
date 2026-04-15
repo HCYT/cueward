@@ -133,7 +133,7 @@ fn clone_state_entry(
             raw.insert("UUID".into(), Value::String(id.into()));
             raw.insert(TITLE_KEY.into(), Value::String(title.into()));
             raw.insert("ZOrder".into(), Value::Integer(z_order.into()));
-            let frame = resolve_create_frame(entries, template, options, displays)?;
+            let frame = resolve_create_frame(entries, Some(template), options, displays)?;
             let size = StickySize {
                 width: frame.width,
                 height: frame.height,
@@ -147,7 +147,7 @@ fn clone_state_entry(
         }
         None => {
             let mut entry = default_state_entry(id, title);
-            let frame = resolve_create_frame(entries, &entry, options, displays)?;
+            let frame = resolve_create_frame(entries, None, options, displays)?;
             let size = StickySize {
                 width: frame.width,
                 height: frame.height,
@@ -189,13 +189,13 @@ fn frame_from_entry(entry: &StickyStateEntry) -> Option<StickyFrame> {
 
 fn resolve_create_frame(
     entries: &[StickyStateEntry],
-    template: &StickyStateEntry,
+    template: Option<&StickyStateEntry>,
     options: &StickyMutationOptions,
     displays: &[StickyDisplayBounds],
 ) -> Result<StickyFrame, MacosError> {
     let size = options
         .explicit_size()
-        .or_else(|| size_from_entry(template))
+        .or_else(|| template.and_then(size_from_entry))
         .unwrap_or(StickySize {
             width: 300,
             height: 200,
@@ -224,7 +224,8 @@ fn resolve_create_frame(
         });
     }
 
-    Ok(frame_from_entry(template)
+    Ok(template
+        .and_then(frame_from_entry)
         .map(|frame| frame.offset(24, -24).with_size(size))
         .unwrap_or(StickyFrame {
             x: 200,

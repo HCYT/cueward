@@ -97,7 +97,7 @@ fn create_sticky_with_geometry_writes_frame_and_expanded_size() {
 
     assert_eq!(
         created.raw.get("Frame").and_then(Value::as_string),
-        Some("{{224, 876}, {420, 260}}")
+        Some("{{200, 900}, {420, 260}}")
     );
     assert_eq!(
         created.raw.get("ExpandedSize").and_then(Value::as_string),
