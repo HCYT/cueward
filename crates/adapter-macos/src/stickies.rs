@@ -131,6 +131,7 @@ fn write_sticky_body(path: &Path, body: &str) -> Result<(), MacosError> {
         .arg("-stdout")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| MacosError::Other(format!("textutil: {err}")))?;
 
