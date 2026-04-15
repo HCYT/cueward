@@ -89,7 +89,7 @@ pub(crate) fn with_safari_session<T>(
 }
 
 fn safari_lock_path() -> Result<PathBuf, MacosError> {
-    let home = std::env::var("HOME")
+    let home = crate::util::home_dir()?.into_os_string().into_string().map_err(|_| MacosError::Other("Invalid UTF-8 in HOME path".into()))
         .map_err(|_| MacosError::Other("HOME environment variable must be set".into()))?;
     Ok(PathBuf::from(home).join(".cueward").join("lock.json"))
 }

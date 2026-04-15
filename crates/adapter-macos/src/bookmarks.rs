@@ -115,7 +115,7 @@ pub fn delete_bookmark_cli(
 }
 
 fn safari_bookmarks_path() -> Result<PathBuf, MacosError> {
-    let home = std::env::var("HOME")
+    let home = crate::util::home_dir()?.into_os_string().into_string().map_err(|_| MacosError::Other("Invalid UTF-8 in HOME path".into()))
         .map_err(|_| MacosError::Other("HOME environment variable must be set".to_string()))?;
     let path = PathBuf::from(home).join("Library/Safari/Bookmarks.plist");
     if !path.exists() {

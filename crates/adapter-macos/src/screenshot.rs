@@ -54,11 +54,11 @@ fn ensure_screenshot_file_exists(path: &Path) -> Result<(), String> {
 }
 
 fn ensure_cache_dir() -> Result<String, MacosError> {
-    let home = std::env::var("HOME").map_err(|_| MacosError::Other("HOME not set".into()))?;
-    let dir = format!("{home}/{CACHE_DIR}");
+    let home = crate::util::home_dir()?;
+    let dir = home.join(CACHE_DIR);
     fs::create_dir_all(&dir)
-        .map_err(|e| MacosError::Other(format!("failed to create {dir}: {e}")))?;
-    Ok(dir)
+        .map_err(|e| MacosError::Other(format!("failed to create {}: {}", dir.display(), e)))?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 /// Capture a screenshot.

@@ -20,7 +20,7 @@ fn list_by_title(title: &str) -> Result<Vec<QuickNote>, MacosError> {
 }
 
 fn db_path() -> Result<PathBuf, MacosError> {
-    let home = std::env::var("HOME")
+    let home = crate::util::home_dir()?.into_os_string().into_string().map_err(|_| MacosError::Other("Invalid UTF-8 in HOME path".into()))
         .map_err(|_| MacosError::Other("HOME environment variable not set".to_string()))?;
     Ok(PathBuf::from(home).join("Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"))
 }

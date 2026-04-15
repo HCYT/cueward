@@ -105,7 +105,5 @@ pub(crate) struct AttachmentOcrBlock {
 }
 
 fn home_dir() -> Result<PathBuf, MacosError> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| MacosError::Other("HOME environment variable must be set".into()))
+    crate::util::home_dir()
 }

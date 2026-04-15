@@ -12,7 +12,7 @@ use crate::MacosError;
 const CORE_DATA_EPOCH: i64 = 978_307_200;
 
 fn history_db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::util::home_dir().map(|p| p.into_os_string().into_string().unwrap_or_default()).unwrap_or_default();
     PathBuf::from(home).join("Library/Safari/History.db")
 }
 

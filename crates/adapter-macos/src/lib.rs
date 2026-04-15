@@ -38,3 +38,4 @@ impl PlatformAdapter for MacosAdapter {
         messages::capture(since)
     }
 }
+pub mod util;
