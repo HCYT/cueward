@@ -341,12 +341,12 @@ fn delete_sticky_in_root(root: &Path, id: &str) -> Result<(), MacosError> {
         return Err(MacosError::Other(format!("sticky not found: {id}")));
     }
 
+    write_saved_state(&saved_state_path(root), &entries)?;
     let dir = sticky_dir(root, id);
     if dir.exists() {
         fs::remove_dir_all(&dir)
             .map_err(|err| MacosError::Other(format!("failed to delete sticky dir: {err}")))?;
     }
-    write_saved_state(&saved_state_path(root), &entries)?;
     Ok(())
 }
 
