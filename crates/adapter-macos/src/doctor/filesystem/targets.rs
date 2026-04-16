@@ -18,11 +18,11 @@ pub(super) struct ProbeTarget {
 }
 
 impl ProbeTarget {
-    pub(super) fn absolute_path(self) -> PathBuf {
+    pub(super) fn absolute_path(self) -> Result<PathBuf, &'static str> {
         if self.relative_path.starts_with('/') {
-            PathBuf::from(self.relative_path)
+            Ok(PathBuf::from(self.relative_path))
         } else {
-            home_dir().join(self.relative_path)
+            Ok(home_dir()?.join(self.relative_path))
         }
     }
 
@@ -35,10 +35,10 @@ impl ProbeTarget {
     }
 }
 
-fn home_dir() -> PathBuf {
+fn home_dir() -> Result<PathBuf, &'static str> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .ok_or("HOME environment variable must be set to locate macOS data sources")
 }
 
 pub(super) const MESSAGES_CHAT_DB: ProbeTarget = ProbeTarget {

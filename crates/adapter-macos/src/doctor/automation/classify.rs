@@ -103,17 +103,19 @@ fn classify_live_safari_error(message: &str) -> DoctorCheck {
 
 fn is_automation_denied(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
-    normalized.contains("not allowed")
-        || normalized.contains("not authorized")
+    normalized.contains("not allowed to send apple events")
+        || normalized.contains("not authorized to send apple events")
+        || normalized.contains("not permitted to send apple events")
         || normalized.contains("permission denied")
-        || normalized.contains("authorization")
         || normalized.contains("1743")
 }
 
 fn is_javascript_automation_unavailable(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
     normalized.contains("javascript from apple events")
-        || (normalized.contains("do javascript") && normalized.contains("not"))
+        || normalized.contains("allow javascript from apple events")
+        || normalized.contains("doesn't understand the do javascript message")
+        || normalized.contains("does not understand the do javascript message")
         || normalized.contains("can't make current tab")
 }
 
@@ -152,5 +154,29 @@ mod tests {
 
         assert_eq!(check.status, DoctorCheckStatus::Warn);
         assert!(check.fix.is_some());
+    }
+
+    #[test]
+    fn automation_classifier_does_not_flag_generic_authorization_word() {
+        let check = automation_check(
+            "automation.notes",
+            "Notes",
+            Err(crate::MacosError::Other(
+                "OAuth authorization code expired".to_string(),
+            )),
+        );
+
+        assert_eq!(check.status, DoctorCheckStatus::Warn);
+        assert!(check.fix.is_none());
+    }
+
+    #[test]
+    fn javascript_classifier_does_not_flag_generic_do_javascript_with_not_substring() {
+        let check = live_safari_check(Err(crate::MacosError::Other(
+            "do JavaScript returned notification marker".to_string(),
+        )));
+
+        assert_eq!(check.status, DoctorCheckStatus::Warn);
+        assert!(check.fix.is_none());
     }
 }

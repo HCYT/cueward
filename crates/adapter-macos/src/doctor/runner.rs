@@ -7,6 +7,7 @@ pub struct DoctorOptions {
     pub live_safari: bool,
 }
 
+/// Run all doctor checks and return a diagnostic report.
 pub fn run_doctor(options: DoctorOptions) -> DoctorReport {
     let checks = collect_checks(options);
     DoctorReport {
@@ -15,9 +16,9 @@ pub fn run_doctor(options: DoctorOptions) -> DoctorReport {
     }
 }
 
-fn collect_checks(_options: DoctorOptions) -> Vec<DoctorCheck> {
+fn collect_checks(options: DoctorOptions) -> Vec<DoctorCheck> {
     let mut checks = filesystem::run_checks();
-    checks.extend(automation::run_checks(_options.live_safari));
+    checks.extend(automation::run_checks(options.live_safari));
     checks
 }
 

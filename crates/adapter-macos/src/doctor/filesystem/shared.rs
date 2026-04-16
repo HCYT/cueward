@@ -9,33 +9,29 @@ use crate::error::{FULL_DISK_ACCESS_GUIDANCE, FULL_DISK_ACCESS_SETTINGS_PATH};
 use super::targets::{ProbeKind, ProbeTarget};
 
 pub(super) fn probe_target(target: ProbeTarget) -> DoctorCheck {
+    let path = match target.absolute_path() {
+        Ok(path) => path,
+        Err(message) => return warn_check(target, message.to_string()),
+    };
+
     match target.kind {
-        ProbeKind::Directory => probe_directory(target),
-        ProbeKind::Sqlite => probe_sqlite(target),
+        ProbeKind::Directory => probe_directory(target, &path),
+        ProbeKind::Sqlite => probe_sqlite(target, &path),
     }
 }
 
-fn probe_directory(target: ProbeTarget) -> DoctorCheck {
-    let path = target.absolute_path();
-    if !path.exists() {
-        return missing_check(target);
-    }
-
-    match fs::read_dir(&path) {
+fn probe_directory(target: ProbeTarget, path: &std::path::Path) -> DoctorCheck {
+    match fs::read_dir(path) {
         Ok(_) => pass_check(target, "readable"),
+        Err(err) if err.kind() == ErrorKind::NotFound => missing_check(target),
         Err(err) if is_permission_denied_io_error(&err) => permission_denied_check(target),
         Err(err) => warn_check(target, format!("failed to read directory: {err}")),
     }
 }
 
-fn probe_sqlite(target: ProbeTarget) -> DoctorCheck {
-    let path = target.absolute_path();
-    if !path.exists() {
-        return missing_check(target);
-    }
-
+fn probe_sqlite(target: ProbeTarget, path: &std::path::Path) -> DoctorCheck {
     match Connection::open_with_flags(
-        &path,
+        path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
         Ok(conn) => match conn.prepare("SELECT 1") {
@@ -45,6 +41,7 @@ fn probe_sqlite(target: ProbeTarget) -> DoctorCheck {
             }
             Err(err) => warn_check(target, format!("failed to prepare sqlite probe: {err}")),
         },
+        Err(_err) if is_missing_sqlite_path(path) => missing_check(target),
         Err(err) if is_permission_denied_sqlite_error(&err.to_string()) => {
             permission_denied_check(target)
         }
@@ -106,20 +103,46 @@ fn is_permission_denied_io_error(err: &std::io::Error) -> bool {
 
 fn is_permission_denied_sqlite_error(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
-    normalized.contains("unable to open")
-        || normalized.contains("permission denied")
+    normalized.contains("permission denied")
         || normalized.contains("operation not permitted")
         || normalized.contains("access denied")
 }
 
+fn is_missing_sqlite_path(path: &std::path::Path) -> bool {
+    matches!(
+        fs::File::open(path),
+        Err(err) if err.kind() == ErrorKind::NotFound
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
     use rusqlite::Connection;
 
     use crate::doctor::DoctorCheckStatus;
 
     use super::super::targets::{ProbeKind, ProbeTarget};
     use super::{is_permission_denied_sqlite_error, probe_target};
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard(Option<OsString>);
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous_home) => unsafe {
+                    std::env::set_var("HOME", previous_home);
+                },
+                None => unsafe {
+                    std::env::remove_var("HOME");
+                },
+            }
+        }
+    }
 
     fn temp_target(
         absolute_path: &std::path::Path,
@@ -166,10 +189,48 @@ mod tests {
 
     #[test]
     fn sqlite_permission_detection_matches_expected_errors() {
-        assert!(is_permission_denied_sqlite_error(
+        assert!(!is_permission_denied_sqlite_error(
             "unable to open database file"
         ));
         assert!(is_permission_denied_sqlite_error("Operation not permitted"));
         assert!(!is_permission_denied_sqlite_error("file is not a database"));
+    }
+
+    #[test]
+    fn sqlite_probe_reports_missing_status_when_database_is_absent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp_target(
+            &temp.path().join("missing.db"),
+            ProbeKind::Sqlite,
+            DoctorCheckStatus::Warn,
+        );
+
+        let check = probe_target(target);
+
+        assert_eq!(check.status, DoctorCheckStatus::Warn);
+        assert_eq!(check.message, "target not found");
+    }
+
+    #[test]
+    fn relative_target_without_home_reports_home_error() {
+        let _lock = HOME_LOCK.lock().expect("home lock");
+        let previous_home = std::env::var_os("HOME");
+        let _guard = HomeGuard(previous_home);
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+
+        let target = ProbeTarget {
+            id: "test.relative",
+            relative_path: "Library/Messages/chat.db",
+            kind: ProbeKind::Sqlite,
+            required: true,
+            missing_status: DoctorCheckStatus::Warn,
+        };
+
+        let check = probe_target(target);
+
+        assert_eq!(check.status, DoctorCheckStatus::Warn);
+        assert!(check.message.contains("HOME environment variable must be set"));
     }
 }
