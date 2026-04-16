@@ -1,3 +1,4 @@
+use super::automation;
 use super::filesystem;
 use super::{DoctorCheck, DoctorCheckStatus, DoctorReport};
 
@@ -15,7 +16,9 @@ pub fn run_doctor(options: DoctorOptions) -> DoctorReport {
 }
 
 fn collect_checks(_options: DoctorOptions) -> Vec<DoctorCheck> {
-    filesystem::run_checks()
+    let mut checks = filesystem::run_checks();
+    checks.extend(automation::run_checks(_options.live_safari));
+    checks
 }
 
 fn report_ok(checks: &[DoctorCheck]) -> bool {
@@ -47,6 +50,22 @@ mod tests {
 
         assert!(ids.contains(&"fda.messages.chat_db"));
         assert!(ids.contains(&"fda.safari.history_db"));
+        assert!(ids.contains(&"automation.notes"));
+        assert!(ids.contains(&"automation.reminders"));
+        assert!(ids.contains(&"automation.calendar"));
+        assert!(ids.contains(&"automation.safari"));
+    }
+
+    #[test]
+    fn run_doctor_skips_live_safari_probe_by_default() {
+        let report = run_doctor(DoctorOptions::default());
+        let live_check = report
+            .checks
+            .iter()
+            .find(|check| check.id == "live.safari.js")
+            .expect("live safari check");
+
+        assert_eq!(live_check.status, DoctorCheckStatus::Skip);
     }
 
     #[test]

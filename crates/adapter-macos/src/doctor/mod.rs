@@ -1,3 +1,4 @@
+mod automation;
 mod filesystem;
 mod runner;
 mod types;
