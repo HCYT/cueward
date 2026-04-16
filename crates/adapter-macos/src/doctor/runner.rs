@@ -1,3 +1,4 @@
+use super::filesystem;
 use super::{DoctorCheck, DoctorCheckStatus, DoctorReport};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -14,7 +15,7 @@ pub fn run_doctor(options: DoctorOptions) -> DoctorReport {
 }
 
 fn collect_checks(_options: DoctorOptions) -> Vec<DoctorCheck> {
-    Vec::new()
+    filesystem::run_checks()
 }
 
 fn report_ok(checks: &[DoctorCheck]) -> bool {
@@ -39,11 +40,13 @@ mod tests {
     }
 
     #[test]
-    fn run_doctor_defaults_to_ok_when_no_checks_are_registered() {
+    fn run_doctor_includes_filesystem_check_ids() {
         let report = run_doctor(DoctorOptions::default());
 
-        assert!(report.ok);
-        assert!(report.checks.is_empty());
+        let ids: Vec<&str> = report.checks.iter().map(|check| check.id.as_str()).collect();
+
+        assert!(ids.contains(&"fda.messages.chat_db"));
+        assert!(ids.contains(&"fda.safari.history_db"));
     }
 
     #[test]
